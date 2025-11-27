@@ -797,8 +797,9 @@ def train():
                 x_pred = model(x_noisy, t_test)
 
                 comparison = torch.cat([
-                    (x_test + 1) / 2,
                     (x_noisy + 1) / 2,
+                    (x_pred + 1) / 2,
+                    (x_test + 1) / 2
                 ], dim=0)
 
                 save_image(
