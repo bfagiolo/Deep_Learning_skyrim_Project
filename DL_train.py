@@ -93,6 +93,19 @@ class PatchTextureDataset(Dataset):
 
     def __init__(self, root_dir, patch_size=512,
                  patches_per_image=4, max_images=None, min_size=None):
+                   self.paths = [p for p in self.paths if os.path.isfile(p)
+              and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
+
+        # Add size filter
+        valid_paths = []
+        for p in self.paths:
+            img = Image.open(p)
+            if img.width >= patch_size and img.height >= patch_size:
+                valid_paths.append(p)
+            else:
+                print(f"Skipping small image: {p} ({img.width}x{img.height})")
+        self.paths = valid_paths
+
         self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
         self.paths = [p for p in self.paths if os.path.isfile(p)
                       and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
