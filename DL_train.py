@@ -83,7 +83,6 @@ LR = 2e-4
 # ============================================================
 # 2. PATCH DATASET
 # ============================================================
-
 class PatchTextureDataset(Dataset):
     """
     Dataset that returns random patches from high-res textures.
@@ -93,24 +92,30 @@ class PatchTextureDataset(Dataset):
 
     def __init__(self, root_dir, patch_size=512,
                  patches_per_image=4, max_images=None, min_size=None):
-                   self.paths = [p for p in self.paths if os.path.isfile(p)
-              and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
-
-        # Add size filter
-        valid_paths = []
-        for p in self.paths:
-            img = Image.open(p)
-            if img.width >= patch_size and img.height >= patch_size:
-                valid_paths.append(p)
-            else:
-                print(f"Skipping small image: {p} ({img.width}x{img.height})")
-        self.paths = valid_paths
-
+        # Get all image paths
         self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
-        self.paths = [p for p in self.paths if os.path.isfile(p)
-                      and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
+        self.paths = [
+            p for p in self.paths
+            if os.path.isfile(p)
+            and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))
+        ]
+
+        # Limit number of images if requested
         if max_images is not None:
             self.paths = self.paths[:max_images]
+
+        # Filter out images that are too small
+        valid_paths = []
+        for p in self.paths:
+            try:
+                with Image.open(p) as img:
+                    if img.width >= patch_size and img.height >= patch_size:
+                        valid_paths.append(p)
+                    else:
+                        print(f"Skipping small image: {p} ({img.width}x{img.height})")
+            except Exception as e:
+                print(f"Failed to open image {p}: {e}")
+        self.paths = valid_paths
 
         self.patch_size = patch_size
         self.patches_per_image = patches_per_image
@@ -119,7 +124,10 @@ class PatchTextureDataset(Dataset):
         # Only convert to tensor and normalize - keep native resolution
         self.transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(0.5, 0.5)
+            transforms.Normalize(
+                (0.5, 0.5, 0.5),
+                (0.5, 0.5, 0.5)
+            ),
         ])
 
     def __len__(self):
@@ -128,8 +136,8 @@ class PatchTextureDataset(Dataset):
     def __getitem__(self, idx):
         # Map idx to image and patch number
         img_idx = idx // self.patches_per_image
-
         path = self.paths[img_idx]
+
         img = Image.open(path).convert("RGB")
 
         # Keep native resolution - no resizing
@@ -138,17 +146,15 @@ class PatchTextureDataset(Dataset):
         # Extract random patch
         _, h, w = img.shape
 
-        # Skip images that are too small
+        # If image is smaller than min_size, pad it
         if h < self.min_size or w < self.min_size:
-            # Return a centered crop padded if necessary
-            if h < self.patch_size or w < self.patch_size:
-                # Pad to patch_size
-                pad_h = max(0, self.patch_size - h)
-                pad_w = max(0, self.patch_size - w)
+            pad_h = max(0, self.patch_size - h)
+            pad_w = max(0, self.patch_size - w)
+            if pad_h > 0 or pad_w > 0:
                 img = F.pad(img, (0, pad_w, 0, pad_h), mode='replicate')
                 _, h, w = img.shape
 
-        # Extract random patch
+        # Extract random patch (or full image if still smaller)
         if h >= self.patch_size and w >= self.patch_size:
             top = random.randint(0, h - self.patch_size)
             left = random.randint(0, w - self.patch_size)
