@@ -25,14 +25,14 @@ args = parser.parse_args()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry", "NORMALS": "data/png_input/normals",
+TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS": "data/png_input/normals/",
                 "PLANTS": "data/png_input/diffuse/organized_textures/nature_foliage/",
-                "SNOW": "data/png_input/diffuse/organized_textures/snow_ice",
-                "STONE-ARCH": "data/png_input/diffuse/organized_textures/stone_masonry",
-                "TERRAIN": "data/png_input/diffuse/organized_textures/terrain_dirt",
-                "CLOTHING": "data/png_input/diffuse/organized_textures/armors"}
+                "SNOW": "data/png_input/diffuse/organized_textures/snow_ice/",
+                "STONE-ARCH": "data/png_input/diffuse/organized_textures/stone_masonry/",
+                "TERRAIN": "data/png_input/diffuse/organized_textures/terrain_dirt/",
+                "CLOTHING": "data/png_input/diffuse/organized_textures/armors/"}
 TEXTURE_DIR = TEXTURE_DIRS[args.d]
-SAVE_DIR = "diffusion_run"
+SAVE_DIR = "diffusion_run/"+args.d+"/"
 MODEL_DIR = os.path.join(SAVE_DIR, "model")
 TRAIN_SAMPLES_DIR = os.path.join(SAVE_DIR, "train_samples")
 RESULTS_DIR = os.path.join(SAVE_DIR, "results")
@@ -42,7 +42,7 @@ os.makedirs(TRAIN_SAMPLES_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 DEBUG_FAST_RUN = False
-DEBUG_NOISE_TEST = True
+DEBUG_NOISE_TEST = False
 
 MAX_TRAINING_NOISE_LEVEL = 0.25
 NOISE_SCHEDULE = "cosine"
@@ -52,7 +52,7 @@ NOISE_SCHEDULE = "cosine"
 # ============================================================
 USE_BLUR = True  # Toggle blur on/off
 MAX_TRAINING_BLUR_LEVEL = 0.75  # 0.0 = no blur, 1.0 = max blur
-BLUR_SCHEDULE = "cosin"  # "linear" or "cosine"
+BLUR_SCHEDULE = "cosine"  # "linear" or "cosine"
 MAX_BLUR_SIGMA = 4.0  # Maximum Gaussian blur sigma at blur_level=1.0
 MIN_BLUR_SIGMA = 0.0  # Minimum blur sigma at blur_level=0.0
 
@@ -71,8 +71,8 @@ if DEBUG_FAST_RUN:
 else:
     EPOCHS = 100
     HR_SIZE = 2048  # Support 2K textures
-    TIMESTEPS = 1000
-    BATCH_SIZE = 16
+    TIMESTEPS = 3000
+    BATCH_SIZE = 8
     CHANNELS = 128
     MAX_IMAGES = None
     PATCH_SIZE = 512
@@ -426,8 +426,6 @@ class SinusoidalTimeEmbedding(nn.Module):
         if self.dim % 2 == 1:
             emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
         return emb
-
-
 class ResidualBlock(nn.Module):
     """Residual block with time embedding"""
 
@@ -443,8 +441,15 @@ class ResidualBlock(nn.Module):
         else:
             self.residual_conv = nn.Identity()
 
-        self.norm1 = nn.GroupNorm(8, in_ch)
-        self.norm2 = nn.GroupNorm(8, out_ch)
+        # Adaptive group count - find largest divisor <= 8
+        def get_num_groups(channels):
+            for g in [8, 4, 2, 1]:
+                if channels % g == 0:
+                    return g
+            return 1
+        
+        self.norm1 = nn.GroupNorm(get_num_groups(in_ch), in_ch)
+        self.norm2 = nn.GroupNorm(get_num_groups(out_ch), out_ch)
 
     def forward(self, x, t_emb):
         residual = self.residual_conv(x)
