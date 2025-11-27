@@ -169,7 +169,7 @@ class PatchTextureDataset(Dataset):
             pad_h = max(0, self.patch_size - h)
             pad_w = max(0, self.patch_size - w)
             if pad_h > 0 or pad_w > 0:
-                img = F.pad(img, (0, pad_w, 0, pad_h), mode='reflect')
+                img = F.pad(img, (0, pad_w, 0, pad_h), mode='replicate')
                 _, h, w = img.shape
 
         # Extract random patch (or full image if still smaller)
