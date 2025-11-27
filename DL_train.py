@@ -109,10 +109,7 @@ class PatchTextureDataset(Dataset):
         for p in self.paths:
             try:
                 with Image.open(p) as img:
-                    if img.width >= patch_size and img.height >= patch_size:
-                        valid_paths.append(p)
-                    else:
-                        print(f"Skipping small image: {p} ({img.width}x{img.height})")
+                    valid_paths.append(p)
             except Exception as e:
                 print(f"Failed to open image {p}: {e}")
         self.paths = valid_paths
