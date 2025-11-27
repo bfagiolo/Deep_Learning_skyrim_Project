@@ -73,12 +73,15 @@ else:
     EPOCHS = 100
     HR_SIZE = 2048  # Support 2K textures
     TIMESTEPS = 3000
-    BATCH_SIZE = 8
+    BATCH_SIZE = 64  # INCREASED - RTX 6000 has 48GB VRAM
     CHANNELS = 128
     MAX_IMAGES = None
     PATCH_SIZE = 256
 
 LR = 2e-4
+
+# Dataset caching option
+CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
 
 
 # ============================================================
@@ -92,7 +95,8 @@ class PatchTextureDataset(Dataset):
     """
 
     def __init__(self, root_dir, patch_size=512,
-                 patches_per_image=4, max_images=None, min_size=None):
+                 patches_per_image=4, max_images=None, min_size=None,
+                 cache_in_memory=False):
         # Get all image paths
         self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
         self.paths = [
@@ -128,6 +132,20 @@ class PatchTextureDataset(Dataset):
             ),
         ])
 
+        # Cache images in memory for faster training
+        self.cache_in_memory = cache_in_memory
+        self.image_cache = {}
+
+        if cache_in_memory and len(self.paths) > 0:
+            print(f"Caching {len(self.paths)} images in memory...")
+            for p in tqdm(self.paths, desc="Loading images"):
+                try:
+                    img = Image.open(p).convert("RGB")
+                    self.image_cache[p] = self.transform(img)
+                except Exception as e:
+                    print(f"Failed to cache {p}: {e}")
+            print(f"Cached {len(self.image_cache)} images")
+
     def __len__(self):
         return len(self.paths) * self.patches_per_image
 
@@ -136,10 +154,12 @@ class PatchTextureDataset(Dataset):
         img_idx = idx // self.patches_per_image
         path = self.paths[img_idx]
 
-        img = Image.open(path).convert("RGB")
-
-        # Keep native resolution - no resizing
-        img = self.transform(img)  # [3, H, W] at original size
+        # Load from cache or disk
+        if self.cache_in_memory and path in self.image_cache:
+            img = self.image_cache[path].clone()
+        else:
+            img = Image.open(path).convert("RGB")
+            img = self.transform(img)
 
         # Extract random patch
         _, h, w = img.shape
@@ -443,6 +463,8 @@ class SinusoidalTimeEmbedding(nn.Module):
         if self.dim % 2 == 1:
             emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
         return emb
+
+
 class ResidualBlock(nn.Module):
     """Residual block with time embedding"""
 
@@ -669,18 +691,28 @@ def p_losses(model, x0, t, hf_weight=0.5, use_blur=False, blur_level=0.0):
 def train():
     start_time = time.time()
 
-    # Use patch dataset
+    # Use patch dataset with caching
     dataset = PatchTextureDataset(
         TEXTURE_DIR,
         patch_size=PATCH_SIZE,
         patches_per_image=PATCHES_PER_IMAGE,
-        max_images=MAX_IMAGES
+        max_images=MAX_IMAGES,
+        cache_in_memory=CACHE_IMAGES_IN_MEMORY
     )
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
     print(f"Native resolution textures - no downsampling")
 
-    dl = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
-                    num_workers=4, drop_last=True, pin_memory=True)
+    # Optimized DataLoader
+    dl = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=12,
+        drop_last=True,
+        pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True
+    )
 
     model = TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE)
 
