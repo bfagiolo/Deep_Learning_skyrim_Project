@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import os
 import math
 import glob
@@ -10,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from torchvision.utils import save_image
+from torchvision.utils import epoch
 
 import time
 import random
@@ -708,30 +709,33 @@ def train():
         epoch_loss = 0
         epoch_mse = 0
         epoch_hf = 0
-
-        for x0 in dl:
+    
+        pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{EPOCHS}")
+        for x0 in pbar:
             x0 = x0.to(DEVICE)
-
+    
             t = torch.randint(0, k_max + 1, (x0.shape[0],), device=DEVICE).long()
-
+    
             # Sample random blur level for this batch (if enabled)
             if USE_BLUR:
-                # Random blur level between 0 and MAX_TRAINING_BLUR_LEVEL
                 batch_blur_level = random.uniform(0, MAX_TRAINING_BLUR_LEVEL)
             else:
                 batch_blur_level = 0.0
-
+    
             loss, mse, hf = p_losses(model, x0, t, use_blur=USE_BLUR, blur_level=batch_blur_level)
-
+    
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-
+    
             epoch_loss += loss.item()
             epoch_mse += mse
             epoch_hf += hf
-
+    
+            # Update progress bar with current loss
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
+    
         scheduler.step()
 
         avg_loss = epoch_loss / len(dl)
