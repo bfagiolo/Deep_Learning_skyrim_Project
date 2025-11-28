@@ -859,7 +859,7 @@ def train():
                         drop_last=False, pin_memory=True)
 
 
-    detail_weights : Tensor[float] = tensor([detail_score(dl[i]) for i in range(len(dl))])
+    detail_weights = tensor([detail_score(dl[i]) for i in range(len(dl))])
 
     F.normalize(detail_weights)
 
