@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
-
+from torchvision.transforms.functional import rgb_to_grayscale
 import time
 import random
 import argparse
