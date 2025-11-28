@@ -5,6 +5,7 @@ import glob
 from pathlib import Path
 
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 
 import torch
 import torch.nn as nn
@@ -76,7 +77,7 @@ else:
     EPOCHS = 100
     HR_SIZE = 2048  # Support 2K textures
     TIMESTEPS = 3000
-    BATCH_SIZE = 64  # INCREASED - RTX 6000 has 48GB VRAM
+    BATCH_SIZE = 32  # INCREASED - RTX 6000 has 48GB VRAM
     CHANNELS = 128
     MAX_IMAGES = None
     PATCH_SIZE = 256
