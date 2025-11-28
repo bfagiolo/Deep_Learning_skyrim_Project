@@ -791,7 +791,7 @@ def train():
         persistent_workers=True
     )
     val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE,
-                        shuffle=False, num_workers=4,
+                        shuffle=False, num_workers=6,
                         drop_last=False, pin_memory=True)
 
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
@@ -881,11 +881,11 @@ def train():
         if (epoch + 1) % CHECKPOINT_FREQ == 0:
             torch.save(model.state_dict(),
                        os.path.join(MODEL_DIR, f"checkpoint_{epoch}.pth"))
-        # Save samples every 10 epochs
+        #save samples every n epochs
         if (epoch + 1) % SAVE_EVERY_N == 0:
             model.eval()
             with torch.no_grad():
-                x_test = next(iter(train_dl))[:4].to(DEVICE)
+                x_test = next(iter(dl))[:4].to(DEVICE)
                 k_test = k_max // 2
 
                 # Apply blur if enabled
