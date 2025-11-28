@@ -5,6 +5,7 @@ import glob
 from pathlib import Path
 
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 
 import torch
 import torch.nn as nn
@@ -26,14 +27,14 @@ args = parser.parse_args()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS": "data/png_input/normals/",
-                "PLANTS": "data/png_input/diffuse/organized_textures/nature_foliage/",
-                "SNOW": "data/png_input/diffuse/organized_textures/snow_ice/",
-                "STONE-ARCH": "data/png_input/diffuse/organized_textures/stone_masonry/",
-                "TERRAIN": "data/png_input/diffuse/organized_textures/terrain_dirt/",
-                "CLOTHING": "data/png_input/diffuse/organized_textures/armors/"}
+TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS": "png_input/normals/",
+                "PLANTS": "png_input/diffuse/organized_textures/nature_foliage/",
+                "SNOW": "png_input/diffuse/organized_textures/snow_ice/",
+                "ARCHIT": "png_input/diffuse/organized_textures/stone_masonry/",
+                "TERRAIN": "png_input/diffuse/organized_textures/terrain_dirt/",
+                "CLOTHING": "png_input/diffuse/organized_textures/armors/"}
 TEXTURE_DIR = TEXTURE_DIRS[args.d]
-SAVE_DIR = "diffusion_run/"+args.d+"/"
+SAVE_DIR = "diffusion_run/" + args.d + "/"
 MODEL_DIR = os.path.join(SAVE_DIR, "model")
 TRAIN_SAMPLES_DIR = os.path.join(SAVE_DIR, "train_samples")
 RESULTS_DIR = os.path.join(SAVE_DIR, "results")
@@ -51,7 +52,7 @@ NOISE_SCHEDULE = "cosine"
 # ============================================================
 # BLUR SCHEDULE CONFIG
 # ============================================================
-USE_BLUR = True  # Toggle blur on/off
+USE_BLUR = False  # Toggle blur on/off
 MAX_TRAINING_BLUR_LEVEL = 0.75  # 0.0 = no blur, 1.0 = max blur
 BLUR_SCHEDULE = "cosine"  # "linear" or "cosine"
 MAX_BLUR_SIGMA = 4.0  # Maximum Gaussian blur sigma at blur_level=1.0
@@ -60,6 +61,9 @@ MIN_BLUR_SIGMA = 0.0  # Minimum blur sigma at blur_level=0.0
 # Patch training parameters
 PATCH_SIZE = 256
 PATCHES_PER_IMAGE = 4
+
+SAVE_EVERY_N = 5
+CHECKPOINT_FREQ = 10
 
 if DEBUG_FAST_RUN:
     EPOCHS = 5
@@ -73,7 +77,7 @@ else:
     EPOCHS = 100
     HR_SIZE = 2048  # Support 2K textures
     TIMESTEPS = 3000
-    BATCH_SIZE = 64  # INCREASED - RTX 6000 has 48GB VRAM
+    BATCH_SIZE = 32  # INCREASED - RTX 6000 has 48GB VRAM
     CHANNELS = 128
     MAX_IMAGES = None
     PATCH_SIZE = 256
@@ -95,10 +99,13 @@ class PatchTextureDataset(Dataset):
     """
 
     def __init__(self, root_dir, patch_size=512,
-                 patches_per_image=4, max_images=None, min_size=None,
+                 patches_per_image=4, paths=None, max_images=None, min_size=None,
                  cache_in_memory=False):
         # Get all image paths
-        self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
+        if paths:
+            self.paths = paths
+        else:
+            self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
         self.paths = [
             p for p in self.paths
             if os.path.isfile(p)
@@ -486,7 +493,7 @@ class ResidualBlock(nn.Module):
                 if channels % g == 0:
                     return g
             return 1
-        
+
         self.norm1 = nn.GroupNorm(get_num_groups(in_ch), in_ch)
         self.norm2 = nn.GroupNorm(get_num_groups(out_ch), out_ch)
 
@@ -664,8 +671,22 @@ def high_frequency_loss(pred, target):
     return F.l1_loss(pred_hf, target_hf)
 
 
-def p_losses(model, x0, t, hf_weight=0.5, use_blur=False, blur_level=0.0):
-    """Loss with high-frequency emphasis and optional blur"""
+def p_losses(
+    model,
+    x0,
+    t,
+    mse_weight=1.0,
+    recon_weight=0.5,
+    hf_weight=0.5,
+    use_blur=False,
+    blur_level=0.0,
+):
+    """
+    Combined loss:
+    - noise MSE (standard diffusion training)
+    - image L1 between reconstructed x0_pred and clean x0
+    - high-frequency loss between x0_pred and clean x0
+    """
     noise = torch.randn_like(x0)
 
     # Apply blur to x0 before adding noise if enabled
@@ -674,45 +695,107 @@ def p_losses(model, x0, t, hf_weight=0.5, use_blur=False, blur_level=0.0):
     else:
         x0_processed = x0
 
+    # Forward diffusion: q(x_t | x0_processed, t)
     x_t = q_sample(x0_processed, t, noise)
+
+    # Predict noise
     noise_pred = model(x_t, t)
 
-    # Standard MSE loss
+    # 1) Standard MSE on noise
     mse_loss = F.mse_loss(noise_pred, noise)
 
-    # High-frequency loss
-    hf_loss = high_frequency_loss(noise_pred, noise)
+    # 2) Reconstruct x0 from predicted noise
+    a_hat_t = extract(sqrt_alpha_hat, t, x_t.shape)
+    sqrt_one_minus_ahat_t = extract(sqrt_one_minus_ahat, t, x_t.shape)
 
-    total_loss = mse_loss + hf_weight * hf_loss
+    # x0_pred = (x_t - sqrt(1 - alpha_hat_t) * eps_theta) / sqrt(alpha_hat_t)
+    x0_pred = (x_t - sqrt_one_minus_ahat_t * noise_pred) / a_hat_t
+    x0_pred = x0_pred.clamp(-1.0, 1.0)
 
-    return total_loss, mse_loss.item(), hf_loss.item()
+    # 3) Image-space reconstruction (to keep colors/structure)
+    recon_loss = F.l1_loss(x0_pred, x0)
 
+    # 4) High-frequency loss directly on reconstructed images
+    hf_loss = high_frequency_loss(x0_pred, x0)
+
+    total_loss = (
+        mse_weight * mse_loss
+        + recon_weight * recon_loss
+        + hf_weight * hf_loss
+    )
+
+    return (
+        total_loss,
+        mse_loss.item(),
+        recon_loss.item(),
+        hf_loss.item(),
+    )
+
+def partition_data():
+    all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
+    train_portion = .9
+    train_size = math.floor(len(all_paths) * .9)
+
+    train_ds = PatchTextureDataset(
+        root_dir=TEXTURE_DIR,
+        patch_size=PATCH_SIZE,
+        patches_per_image=PATCHES_PER_IMAGE,
+        max_images=train_size,
+        paths=all_paths[:train_size],
+        cache_in_memory=CACHE_IMAGES_IN_MEMORY,
+    )
+
+    val_ds = PatchTextureDataset(
+        root_dir=TEXTURE_DIR,
+        patch_size=PATCH_SIZE,
+        patches_per_image=PATCHES_PER_IMAGE,
+        paths=all_paths[train_size:],
+        cache_in_memory=CACHE_IMAGES_IN_MEMORY,
+    )
+    return train_ds, val_ds
+
+@torch.no_grad()
+def validate_one_epoch(model, dataloader, k_max):
+    model.eval()
+    total_mse = total_recon = total_hf = count = 0.0
+    for x0 in dataloader:
+        x0 = x0.to(DEVICE)
+        t = torch.randint(0, k_max+1, (x0.shape[0],), device=DEVICE).long()
+        _, mse, recon, hf = p_losses(model, x0, t,
+                                     mse_weight=1.0, recon_weight=0.5, hf_weight=0.5,
+                                     use_blur=False, blur_level=0.0)   # NO blur at val
+        total_mse   += mse * x0.shape[0]
+        total_recon += recon * x0.shape[0]
+        total_hf    += hf * x0.shape[0]
+        count       += x0.shape[0]
+    return total_mse/count, total_recon/count, total_hf/count
 
 def train():
     start_time = time.time()
 
-    # Use patch dataset with caching
-    dataset = PatchTextureDataset(
-        TEXTURE_DIR,
-        patch_size=PATCH_SIZE,
-        patches_per_image=PATCHES_PER_IMAGE,
-        max_images=MAX_IMAGES,
-        cache_in_memory=CACHE_IMAGES_IN_MEMORY
-    )
+    start_time = time.time()
+    train_ds, val_ds = partition_data()
+
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
     print(f"Native resolution textures - no downsampling")
 
     # Optimized DataLoader
     dl = DataLoader(
-        dataset,
+        train_ds,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=12,
+        num_workers=8,
         drop_last=True,
         pin_memory=True,
         prefetch_factor=4,
         persistent_workers=True
     )
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE,
+                        shuffle=False, num_workers=4,
+                        drop_last=False, pin_memory=True)
+
+    print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
+    print(f"Native resolution textures - no downsampling")
 
     model = TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE)
 
@@ -733,55 +816,76 @@ def train():
         print(f"Blur schedule: {BLUR_SCHEDULE}")
     else:
         print(f"Blur DISABLED")
-    print(f"Dataset size: {len(dataset)}")
+    print(f"Dataset size: {len(train_ds)}")
     print(f"Batches per epoch: {len(dl)}")
 
     for epoch in range(EPOCHS):
         model.train()
-        epoch_loss = 0
-        epoch_mse = 0
-        epoch_hf = 0
-    
+        epoch_loss = 0.0
+        epoch_mse = 0.0
+        epoch_recon = 0.0
+        epoch_hf = 0.0
+
         pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{EPOCHS}")
         for x0 in pbar:
             x0 = x0.to(DEVICE)
-    
+
             t = torch.randint(0, k_max + 1, (x0.shape[0],), device=DEVICE).long()
-    
+
             # Sample random blur level for this batch (if enabled)
             if USE_BLUR:
                 batch_blur_level = random.uniform(0, MAX_TRAINING_BLUR_LEVEL)
             else:
                 batch_blur_level = 0.0
-    
-            loss, mse, hf = p_losses(model, x0, t, use_blur=USE_BLUR, blur_level=batch_blur_level)
-    
+
+            loss, mse, recon, hf = p_losses(
+                model,
+                x0,
+                t,
+                mse_weight=1.0,
+                recon_weight=0.5,
+                hf_weight=0.5,
+                use_blur=USE_BLUR,
+                blur_level=batch_blur_level,
+            )
+
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-    
+
             epoch_loss += loss.item()
             epoch_mse += mse
+            epoch_recon += recon
             epoch_hf += hf
-    
+
             # Update progress bar with current loss
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-    
+
         scheduler.step()
 
         avg_loss = epoch_loss / len(dl)
         avg_mse = epoch_mse / len(dl)
+        avg_recon = epoch_recon / len(dl)
         avg_hf = epoch_hf / len(dl)
 
-        print(f"Epoch {epoch + 1}/{EPOCHS} | Loss: {avg_loss:.4f} "
-              f"(MSE: {avg_mse:.4f}, HF: {avg_hf:.4f})")
+        print(
+            f"TRAIN"
+            f"Epoch {epoch + 1}/{EPOCHS} | Loss: {avg_loss:.4f} "
+            f"(MSE: {avg_mse:.4f}, Recon: {avg_recon:.4f}, HF: {avg_hf:.4f})"
+        )
 
+        val_mse, val_recon, val_hf = validate_one_epoch(model, val_dl, k_max)
+        print(f"VALIDATION | MSE: {val_mse:.4f}  Recon: {val_recon:.4f}  HF: {val_hf:.4f}")
+
+        if (epoch + 1) % CHECKPOINT_FREQ == 0:
+            torch.save(model.state_dict(),
+                       os.path.join(MODEL_DIR, f"checkpoint_{epoch}.pth"))
         # Save samples every 10 epochs
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % SAVE_EVERY_N == 0:
             model.eval()
             with torch.no_grad():
-                x_test = next(iter(dl))[:4].to(DEVICE)
+                x_test = next(iter(train_dl))[:4].to(DEVICE)
                 k_test = k_max // 2
 
                 # Apply blur if enabled
@@ -794,12 +898,20 @@ def train():
 
                 # Quick denoising visualization
                 t_test = torch.full((4,), k_test, device=DEVICE, dtype=torch.long)
-                x_pred = model(x_noisy, t_test)
+                noise_pred = model(x_noisy, t_test)
+
+                # Approximate denoised image using predicted noise (one-step)
+                # x0_pred ≈ (x_noisy - sqrt(1-alpha_hat) * noise_pred) / sqrt(alpha_hat)
+                alpha_hat_t = extract(alpha_hat, t_test, x_noisy.shape)
+                sqrt_alpha_hat_t = torch.sqrt(alpha_hat_t)
+                sqrt_one_minus_ahat_t = torch.sqrt(1.0 - alpha_hat_t)
+
+                x_pred = (x_noisy - sqrt_one_minus_ahat_t * noise_pred) / sqrt_alpha_hat_t
 
                 comparison = torch.cat([
                     (x_noisy + 1) / 2,
-                    (x_pred + 1) / 2,
-                    (x_test + 1) / 2
+                    (x_test + 1) / 2,
+                    (x_pred + 1) / 2
                 ], dim=0)
 
                 save_image(
