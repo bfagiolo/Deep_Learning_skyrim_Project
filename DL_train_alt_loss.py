@@ -26,12 +26,12 @@ args = parser.parse_args()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS": "data/png_input/normals/",
-                "PLANTS": "data/png_input/diffuse/organized_textures/nature_foliage/",
-                "SNOW": "data/png_input/diffuse/organized_textures/snow_ice/",
-                "STONE-ARCH": "data/png_input/diffuse/organized_textures/stone_masonry/",
-                "TERRAIN": "data/png_input/diffuse/organized_textures/terrain_dirt/",
-                "CLOTHING": "data/png_input/diffuse/organized_textures/armors/"}
+TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS": "png_input/normals/",
+                "PLANTS": "png_input/diffuse/organized_textures/nature_foliage/",
+                "SNOW": "png_input/diffuse/organized_textures/snow_ice/",
+                "ARCHIT": "png_input/diffuse/organized_textures/stone_masonry/",
+                "TERRAIN": "png_input/diffuse/organized_textures/terrain_dirt/",
+                "CLOTHING": "png_input/diffuse/organized_textures/armors/"}
 TEXTURE_DIR = TEXTURE_DIRS[args.d]
 SAVE_DIR = "diffusion_run/" + args.d + "/"
 MODEL_DIR = os.path.join(SAVE_DIR, "model")
@@ -799,7 +799,7 @@ def train():
         print(f"Blur schedule: {BLUR_SCHEDULE}")
     else:
         print(f"Blur DISABLED")
-    print(f"Dataset size: {len(dataset)}")
+    print(f"Dataset size: {len(train_ds)}")
     print(f"Batches per epoch: {len(dl)}")
 
     for epoch in range(EPOCHS):
