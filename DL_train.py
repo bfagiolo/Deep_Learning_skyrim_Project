@@ -84,9 +84,44 @@ else:
 
 LR = 2e-4
 
-# Dataset caching option
+# resuming where we left off
 CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
 
+import re, glob, os
+
+def _scan_checkpoints(dir_path):
+    """Return dict {epoch_int: full_path} for all checkpoint_*.pth files"""
+    ckpts = {}
+    for f in glob.glob(os.path.join(dir_path, "checkpoint_*.pth")):
+        m = re.search(r"checkpoint_(\d+)\.pth$", f)
+        if m:
+            ckpts[int(m.group(1))] = f
+    return ckpts
+
+def _load_latest(model, optimizer, scheduler, device):
+    """Load the most recent checkpoint if any.  Returns next epoch to run."""
+    ckpts = _scan_checkpoints(MODEL_DIR)
+    if not ckpts:
+        return 0          # start from scratch
+
+    latest_epoch = max(ckpts.keys())
+    latest_file  = ckpts[latest_epoch]
+
+    print(f"➜  resuming from {latest_file}")
+    state = torch.load(latest_file, map_location=device)
+
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    scheduler.load_state_dict(state["scheduler"])
+
+    return latest_epoch   # next epoch to train
+
+def _keep_last_n_checkpoints(dir_path, keep=3):
+    ckpts = _scan_checkpoints(dir_path)
+    if len(ckpts) <= keep:
+        return
+    for epoch in sorted(ckpts.keys())[:-keep]:
+        os.remove(ckpts[epoch])
 
 # ============================================================
 # 2. PATCH DATASET
@@ -806,6 +841,13 @@ def train():
         MAX_TRAINING_NOISE_LEVEL, alpha_hat, TIMESTEPS
     )
 
+    # ---- automatic resume ----
+    start_epoch = _load_latest(model, opt, scheduler, DEVICE)
+    if start_epoch > 0:
+        print(f"   continuing at epoch {start_epoch}")
+    else:
+        print("   no checkpoint found.")
+
     print(f"Training with patch-based approach")
     print(f"Patch sizes: {PATCH_SIZE}x{PATCH_SIZE}")
     print(f"Noise schedule: {NOISE_SCHEDULE}")
@@ -879,14 +921,23 @@ def train():
         print(f"VALIDATION | MSE: {val_mse:.4f}  Recon: {val_recon:.4f}  HF: {val_hf:.4f}")
 
         if (epoch + 1) % CHECKPOINT_FREQ == 0:
-            torch.save(model.state_dict(),
-                       os.path.join(MODEL_DIR, f"checkpoint_{epoch}.pth"))
+                torch.save({
+                "model": model.state_dict(),
+                "optimizer": opt.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            }, os.path.join(MODEL_DIR, f"checkpoint_{epoch + 1}.pth"))
+            # optional: keep only last N checkpoints
+            _keep_last_n_checkpoints(MODEL_DIR, keep=3)
         #save samples every n epochs
         if (epoch + 1) % SAVE_EVERY_N == 0:
             model.eval()
             with torch.no_grad():
                 x_test = next(iter(dl))[:4].to(DEVICE)
-                k_test = k_max // 2
+                # attempt to remove noise at this step
+                # k_test = k_max // 2
+
+                #attempt to remove total amount of noise we expect to add
+                k_test = k_max
 
                 # Apply blur if enabled
                 if USE_BLUR:
