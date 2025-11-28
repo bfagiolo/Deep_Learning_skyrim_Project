@@ -140,7 +140,7 @@ class PatchTextureDataset(Dataset):
         if paths:
             self.paths = paths
         else:
-            self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
+            self.paths = glob.glob(os.path.join(root_dir, "*"))
         self.paths = [
             p for p in self.paths
             if os.path.isfile(p)
@@ -184,7 +184,7 @@ class PatchTextureDataset(Dataset):
                 try:
                     img = Image.open(p).convert("RGB")
                     self.image_cache[p] = self.transform(img)
-                except Exception as e:
+                except Exceptglion as e:
                     print(f"Failed to cache {p}: {e}")
             print(f"Cached {len(self.image_cache)} images")
 
@@ -768,8 +768,9 @@ def p_losses(
 
 def partition_data():
     all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
+    random.shuffle(all_paths)
     train_portion = .9
-    train_size = math.floor(len(all_paths) * .9)
+    train_size = math.floor(len(all_paths) * train_portion)
 
     train_ds = PatchTextureDataset(
         root_dir=TEXTURE_DIR,
