@@ -932,7 +932,7 @@ def train():
         if (epoch + 1) % SAVE_EVERY_N == 0:
             model.eval()
             with torch.no_grad():
-                x_test = next(iter(dl))[:4].to(DEVICE)
+                x_test = next(iter(dl))[:3].to(DEVICE)
                 # attempt to remove noise at this step
                 # k_test = k_max // 2
 
@@ -948,7 +948,7 @@ def train():
                 x_noisy = add_noise_k(x_test_processed, k_test)
 
                 # Quick denoising visualization
-                t_test = torch.full((4,), k_test, device=DEVICE, dtype=torch.long)
+                t_test = torch.full((3,), k_test, device=DEVICE, dtype=torch.long)
                 noise_pred = model(x_noisy, t_test)
 
                 # Approximate denoised image using predicted noise (one-step)
@@ -960,15 +960,15 @@ def train():
                 x_pred = (x_noisy - sqrt_one_minus_ahat_t * noise_pred) / sqrt_alpha_hat_t
 
                 comparison = torch.cat([
-                    (x_noisy + 1) / 2,
-                    (x_test + 1) / 2,
-                    (x_pred + 1) / 2
+                    (x_noisy + 1),
+                    (x_test + 1),
+                    (x_pred + 1),
                 ], dim=0)
 
                 save_image(
                     comparison,
                     os.path.join(TRAIN_SAMPLES_DIR, f"epoch_{epoch + 1}.png"),
-                    nrow=4
+                    nrow=3
                 )
 
     # Save model
