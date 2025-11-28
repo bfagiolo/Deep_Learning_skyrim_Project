@@ -768,14 +768,14 @@ def train():
         train_ds,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=12,
+        num_workers=8,
         drop_last=True,
         pin_memory=True,
         prefetch_factor=4,
         persistent_workers=True
     )
     val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE,
-                        shuffle=False, num_workers=8,
+                        shuffle=False, num_workers=4,
                         drop_last=False, pin_memory=True)
 
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
