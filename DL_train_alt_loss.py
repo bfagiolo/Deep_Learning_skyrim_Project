@@ -51,7 +51,7 @@ NOISE_SCHEDULE = "cosine"
 # ============================================================
 # BLUR SCHEDULE CONFIG
 # ============================================================
-USE_BLUR = True  # Toggle blur on/off
+USE_BLUR = False  # Toggle blur on/off
 MAX_TRAINING_BLUR_LEVEL = 0.75  # 0.0 = no blur, 1.0 = max blur
 BLUR_SCHEDULE = "cosine"  # "linear" or "cosine"
 MAX_BLUR_SIGMA = 4.0  # Maximum Gaussian blur sigma at blur_level=1.0
@@ -60,6 +60,9 @@ MIN_BLUR_SIGMA = 0.0  # Minimum blur sigma at blur_level=0.0
 # Patch training parameters
 PATCH_SIZE = 256
 PATCHES_PER_IMAGE = 4
+
+SAVE_EVERY_N = 5
+CHECKPOINT_FREQ = 10
 
 if DEBUG_FAST_RUN:
     EPOCHS = 5
@@ -95,10 +98,13 @@ class PatchTextureDataset(Dataset):
     """
 
     def __init__(self, root_dir, patch_size=512,
-                 patches_per_image=4, max_images=None, min_size=None,
+                 patches_per_image=4, paths=None, max_images=None, min_size=None,
                  cache_in_memory=False):
         # Get all image paths
-        self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
+        if paths:
+            self.paths = paths
+        else:
+            self.paths = sorted(glob.glob(os.path.join(root_dir, "*")))
         self.paths = [
             p for p in self.paths
             if os.path.isfile(p)
@@ -724,24 +730,41 @@ def p_losses(
         hf_loss.item(),
     )
 
+def partition_data():
+    all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
+    train_portion = .9
+    train_size = math.floor(len(all_paths) * .9)
+
+    train_ds = PatchTextureDataset(
+        root_dir=TEXTURE_DIR,
+        patch_size=PATCH_SIZE,
+        patches_per_image=PATCHES_PER_IMAGE,
+        max_images=train_size,
+        paths=all_paths[:train_size],
+        cache_in_memory=CACHE_IMAGES_IN_MEMORY,
+    )
+
+    val_ds = PatchTextureDataset(
+        root_dir=TEXTURE_DIR,
+        patch_size=PATCH_SIZE,
+        patches_per_image=PATCHES_PER_IMAGE,
+        paths=all_paths[train_size:],
+        cache_in_memory=CACHE_IMAGES_IN_MEMORY,
+    )
+    return train_ds, val_ds
 
 def train():
     start_time = time.time()
 
-    # Use patch dataset with caching
-    dataset = PatchTextureDataset(
-        TEXTURE_DIR,
-        patch_size=PATCH_SIZE,
-        patches_per_image=PATCHES_PER_IMAGE,
-        max_images=MAX_IMAGES,
-        cache_in_memory=CACHE_IMAGES_IN_MEMORY
-    )
+    start_time = time.time()
+    train_ds, val_ds = partition_data()
+
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
     print(f"Native resolution textures - no downsampling")
 
     # Optimized DataLoader
     dl = DataLoader(
-        dataset,
+        train_ds,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=12,
@@ -750,6 +773,12 @@ def train():
         prefetch_factor=4,
         persistent_workers=True
     )
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE,
+                        shuffle=False, num_workers=8,
+                        drop_last=False, pin_memory=True)
+
+    print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
+    print(f"Native resolution textures - no downsampling")
 
     model = TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE)
 
@@ -824,15 +853,22 @@ def train():
         avg_hf = epoch_hf / len(dl)
 
         print(
+            f"TRAIN"
             f"Epoch {epoch + 1}/{EPOCHS} | Loss: {avg_loss:.4f} "
             f"(MSE: {avg_mse:.4f}, Recon: {avg_recon:.4f}, HF: {avg_hf:.4f})"
         )
 
+        val_mse, val_recon, val_hf = validate_one_epoch(model, val_dl, k_max)
+        print(f"VALIDATION | MSE: {val_mse:.4f}  Recon: {val_recon:.4f}  HF: {val_hf:.4f}")
+
+        if (epoch + 1) % CHECKPOINT_FREQ == 0:
+            torch.save(model.state_dict(),
+                       os.path.join(MODEL_DIR, f"checkpoint_{epoch}.pth"))
         # Save samples every 10 epochs
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % SAVE_EVERY_N == 0:
             model.eval()
             with torch.no_grad():
-                x_test = next(iter(dl))[:4].to(DEVICE)
+                x_test = next(iter(train_dl))[:4].to(DEVICE)
                 k_test = k_max // 2
 
                 # Apply blur if enabled
@@ -845,7 +881,15 @@ def train():
 
                 # Quick denoising visualization
                 t_test = torch.full((4,), k_test, device=DEVICE, dtype=torch.long)
-                x_pred = model(x_noisy, t_test)
+                noise_pred = model(x_noisy, t_test)
+
+                # Approximate denoised image using predicted noise (one-step)
+                # x0_pred ≈ (x_noisy - sqrt(1-alpha_hat) * noise_pred) / sqrt(alpha_hat)
+                alpha_hat_t = extract(alpha_hat, t_test, x_noisy.shape)
+                sqrt_alpha_hat_t = torch.sqrt(alpha_hat_t)
+                sqrt_one_minus_ahat_t = torch.sqrt(1.0 - alpha_hat_t)
+
+                x_pred = (x_noisy - sqrt_one_minus_ahat_t * noise_pred) / sqrt_alpha_hat_t
 
                 comparison = torch.cat([
                     (x_noisy + 1) / 2,
