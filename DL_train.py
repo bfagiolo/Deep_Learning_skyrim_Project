@@ -488,7 +488,7 @@ def add_noise_and_blur(x0, noise_level, blur_level, blur_schedule="linear"):
 
     return x_degraded
 
-def detail_score(x0 : Tensor):
+def detail_score(x0):
     # image = PIL image
     x = x0.unsqueeze(0)          # [1,3,H,W]
     x = rgb_to_grayscale(x)                   # [1,1,H,W]
