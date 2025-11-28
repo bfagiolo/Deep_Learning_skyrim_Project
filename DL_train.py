@@ -89,6 +89,7 @@ CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
 
 import re, glob, os
 
+
 def _scan_checkpoints(dir_path):
     """Return dict {epoch_int: full_path} for all checkpoint_*.pth files"""
     ckpts = {}
@@ -98,6 +99,7 @@ def _scan_checkpoints(dir_path):
             ckpts[int(m.group(1))] = f
     return ckpts
 
+
 def _load_latest(model, optimizer, scheduler, device):
     """Load the most recent checkpoint if any.  Returns next epoch to run."""
     ckpts = _scan_checkpoints(MODEL_DIR)
@@ -105,7 +107,7 @@ def _load_latest(model, optimizer, scheduler, device):
         return 0          # start from scratch
 
     latest_epoch = max(ckpts.keys())
-    latest_file  = ckpts[latest_epoch]
+    latest_file = ckpts[latest_epoch]
 
     print(f"➜  resuming from {latest_file}")
     state = torch.load(latest_file, map_location=device)
@@ -116,12 +118,14 @@ def _load_latest(model, optimizer, scheduler, device):
 
     return latest_epoch   # next epoch to train
 
+
 def _keep_last_n_checkpoints(dir_path, keep=3):
     ckpts = _scan_checkpoints(dir_path)
     if len(ckpts) <= keep:
         return
     for epoch in sorted(ckpts.keys())[:-keep]:
         os.remove(ckpts[epoch])
+
 
 # ============================================================
 # 2. PATCH DATASET
@@ -184,7 +188,7 @@ class PatchTextureDataset(Dataset):
                 try:
                     img = Image.open(p).convert("RGB")
                     self.image_cache[p] = self.transform(img)
-                except Exceptglion as e:
+                except Exception as e:
                     print(f"Failed to cache {p}: {e}")
             print(f"Cached {len(self.image_cache)} images")
 
@@ -766,6 +770,7 @@ def p_losses(
         hf_loss.item(),
     )
 
+
 def partition_data():
     all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
     random.shuffle(all_paths)
@@ -790,6 +795,7 @@ def partition_data():
     )
     return train_ds, val_ds
 
+
 @torch.no_grad()
 def validate_one_epoch(model, dataloader, k_max):
     model.eval()
@@ -800,11 +806,12 @@ def validate_one_epoch(model, dataloader, k_max):
         _, mse, recon, hf = p_losses(model, x0, t,
                                      mse_weight=1.0, recon_weight=0.5, hf_weight=0.5,
                                      use_blur=False, blur_level=0.0)   # NO blur at val
-        total_mse   += mse * x0.shape[0]
+        total_mse += mse * x0.shape[0]
         total_recon += recon * x0.shape[0]
-        total_hf    += hf * x0.shape[0]
-        count       += x0.shape[0]
+        total_hf += hf * x0.shape[0]
+        count += x0.shape[0]
     return total_mse/count, total_recon/count, total_hf/count
+
 
 def train():
     start_time = time.time()
@@ -922,14 +929,15 @@ def train():
         print(f"VALIDATION | MSE: {val_mse:.4f}  Recon: {val_recon:.4f}  HF: {val_hf:.4f}")
 
         if (epoch + 1) % CHECKPOINT_FREQ == 0:
-                torch.save({
+            torch.save({
                 "model": model.state_dict(),
                 "optimizer": opt.state_dict(),
                 "scheduler": scheduler.state_dict(),
             }, os.path.join(MODEL_DIR, f"checkpoint_{epoch + 1}.pth"))
             # optional: keep only last N checkpoints
             _keep_last_n_checkpoints(MODEL_DIR, keep=3)
-        #save samples every n epochs
+
+        # save samples every n epochs
         if (epoch + 1) % SAVE_EVERY_N == 0:
             model.eval()
             with torch.no_grad():
@@ -937,7 +945,7 @@ def train():
                 # attempt to remove noise at this step
                 # k_test = k_max // 2
 
-                #attempt to remove total amount of noise we expect to add
+                # attempt to remove total amount of noise we expect to add
                 k_test = k_max
 
                 # Apply blur if enabled
