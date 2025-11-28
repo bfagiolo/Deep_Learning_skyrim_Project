@@ -809,7 +809,7 @@ def partition_data():
         paths=all_paths[train_size:(val_size+train_size)],
         cache_in_memory=CACHE_IMAGES_IN_MEMORY,
     )
-    val_ds = PatchTextureDataset(
+    test_ds = PatchTextureDataset(
         root_dir=TEXTURE_DIR,
         patch_size=PATCH_SIZE,
         patches_per_image=PATCHES_PER_IMAGE,
