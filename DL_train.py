@@ -1039,7 +1039,7 @@ def train():
 def scale_noise(noise : Tensor, x_i):
     #patches in batch
     for a in range(BATCH_SIZE):
-        wt = DETAILS_MAP[str(id(x_i[a]))]
+        wt = DETAILS_MAP[a]
         noise[a]*=wt
 
 
