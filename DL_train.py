@@ -99,7 +99,7 @@ CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
 DETAIL_WEIGHTS = []
 DETAIL_WEIGHTS_VAL = []
 DETAIL_WEIGHTS_TEST = []
-DETAILS_MAP = torch.zeros(BATCH_SIZE)
+DETAILS_MAP = torch.zeros(size=(BATCH_SIZE,))
 import re, glob, os
 
 
@@ -839,7 +839,7 @@ def validate_one_epoch(model, dataloader, k_max):
 
 def populate_weights(patches):
     global DETAILS_MAP
-    DETAILS_MAP = torch.zeros(len(patches))
+    DETAILS_MAP = torch.zeros(size=(len(patches),))
     max_detail = -1
 
     for i,patch in enumerate(patches):
