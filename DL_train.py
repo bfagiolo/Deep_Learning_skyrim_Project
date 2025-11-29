@@ -1,3 +1,8 @@
+from typing import Optional
+
+import numba.cuda.libdevice
+import numpy
+from numba.cuda.cudadecl import Float
 from torch import Tensor
 from tqdm import tqdm
 import os
@@ -95,11 +100,11 @@ else:
 LR = 2e-4
 
 # resuming where we left off
-CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
+CACHE_IMAGES_IN_MEMORY = False  # Set False if you run out of RAM
 DETAIL_WEIGHTS = []
 DETAIL_WEIGHTS_VAL = []
 DETAIL_WEIGHTS_TEST = []
-DETAILS_MAP = torch.zeros(size=(BATCH_SIZE,))
+DETAILS_MAP = torch.zeros(size=(BATCH_SIZE,)).to(DEVICE)
 import re, glob, os
 
 
@@ -314,7 +319,7 @@ def extract(a, t, x_shape):
 def q_sample(x0, t, noise=None):
     if noise is None:
         noise = torch.randn_like(x0)
-    scale_noise(noise, x0)
+    scale_noise(noise)
     a_hat = extract(sqrt_alpha_hat, t, x0.shape)
     om_a = extract(sqrt_one_minus_ahat, t, x0.shape)
 
@@ -356,8 +361,9 @@ def add_noise_level(x0, noise_level):
         return x0
     if alpha <= 0.0:
         return torch.randn_like(x0)
-    populate_weights(x0)
     noise = torch.randn_like(x0)
+
+    populate_weights(x0)
     scale_noise(noise, x0)
 
     sqrt_alpha = math.sqrt(alpha)
@@ -506,12 +512,11 @@ def add_noise_and_blur(x0, noise_level, blur_level, blur_schedule="linear"):
 
     return x_degraded
 
-def detail_score(patch):
+def detail_score(patches):
     # image = PIL image
-    p = patch.unsqueeze(0)          # [1,3,H,W]
-    p = rgb_to_grayscale(p)
-    edges = F.conv2d(p, LAP)
-    return edges.abs().mean().item()
+    p = rgb_to_grayscale(patches)
+    edges = F.conv2d(p, LAP, padding=1)
+    return edges.abs().mean(dim=(1, 2, 3)).squeeze()
 
 
 # ============================================================
@@ -837,18 +842,22 @@ def validate_one_epoch(model, dataloader, k_max):
         count += x0.shape[0]
     return total_mse/count, total_recon/count, total_hf/count
 
-def populate_weights(patches):
+def distribute_weights():
+    a = .6
+    b = 5.4
+    c = 1.2
+    h = 10.0
     global DETAILS_MAP
-    DETAILS_MAP = torch.zeros(size=(len(patches),))
-    max_detail = -1
+    DETAILS_MAP = torch.clamp(torch.atan(DETAILS_MAP*h - b)*a + c, 0, 1)
 
-    for i,patch in enumerate(patches):
-        patch : Tensor
-        score = detail_score(patch)
-        DETAILS_MAP[i] = score
-        if score > max_detail:
-            DETAILS_MAP = score
-    DETAILS_MAP /= max_detail
+@torch.no_grad()
+def populate_weights(patches : Tensor):
+    patches.squeeze()
+    global DETAILS_MAP
+    DETAILS_MAP = detail_score(patches)
+    w_max = max(DETAILS_MAP).item()
+    DETAILS_MAP /= w_max
+    distribute_weights()
 
 
 def train():
@@ -935,9 +944,7 @@ def train():
                 t,
                 mse_weight=1.0,
                 recon_weight=0.5,
-                hf_weight=0.5,
-                use_blur=USE_BLUR,
-                blur_level=batch_blur_level
+                hf_weight=0.5
             )
 
             opt.zero_grad()
@@ -1034,9 +1041,14 @@ def train():
 # 6. SAMPLING
 # ============================================================
 
-def scale_noise(noise : Tensor):
-    #patches in batch
-    noise*DETAILS_MAP
+def scale_noise(noise : Tensor, *kwargs):
+    if len(kwargs) > 0:
+        x0 = kwargs[0]
+        n = x0.shape[0]
+    else:
+        n = BATCH_SIZE
+
+    noise*DETAILS_MAP.reshape((n,1,1,1))
 
 
 
@@ -1052,7 +1064,7 @@ def p_sample(model, x_t, t):
 
     if t[0] > 0:
         noise = torch.randn_like(x_t)
-        scale_noise(noise, x_t)
+        scale_noise(noise)
         var = betas_t
         sample = mean + torch.sqrt(var) * noise
     else:
@@ -1077,37 +1089,14 @@ def sample_from_partial(model, x_k, k):
 # 7. VISUALIZATION WITH NOISE AND BLUR
 # ============================================================
 
-def visualize_starting_noise(noise_level, num=4, tag="check",
-                             blur_level=None, use_blur=None):
+def visualize_starting_noise(noise_level, num=4, tag="check"):
     """
     Saves a comparison of Original vs Degraded images at the given noise/blur levels.
 
     noise_level: 0.0 to 1.0
     - 0.0 = clean (ground truth)
     - 1.0 = pure noise
-
-    blur_level: 0.0 to 1.0 (optional, defaults to MAX_TRAINING_BLUR_LEVEL if use_blur=True)
-    - 0.0 = no blur
-    - 1.0 = max blur
-
-    use_blur: bool (optional, defaults to global USE_BLUR)
-
-    Output image layout (when blur enabled):
-    - Row 1: Original
-    - Row 2: Blurred only
-    - Row 3: Noised only
-    - Row 4: Blurred + Noised
-
-    Output image layout (when blur disabled):
-    - Row 1: Original
-    - Row 1: Original
-    - Row 2: Noised
     """
-    # Use defaults from config if not specified
-    if use_blur is None:
-        use_blur = USE_BLUR
-    if blur_level is None:
-        blur_level = MAX_TRAINING_BLUR_LEVEL if use_blur else 0.0
 
     # Use patch dataset for visualization
     ds = PatchTextureDataset(TEXTURE_DIR, patch_size=PATCH_SIZE,
@@ -1117,7 +1106,6 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
         return
 
     dl = DataLoader(ds, batch_size=num, shuffle=False)
-    # populate_weights(dl)
 
     x0 = next(iter(dl)).to(DEVICE)  # [-1,1]
     # Get timestep info for noise
@@ -1137,38 +1125,6 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
     print(f"Saved visualization: {save_path}")
     print(f"  Noise level: {noise_level:.2f} (timestep k={k})")
     print(f"  Rows: Original | Noised")
-
-
-def visualize_blur_schedule(num_levels=5, num_images=4, tag="blur_schedule"):
-    """
-    Visualize the blur schedule at different levels.
-    Creates a grid showing how blur progresses from 0 to MAX_TRAINING_BLUR_LEVEL.
-    """
-    ds = PatchTextureDataset(TEXTURE_DIR, patch_size=PATCH_SIZE,
-                             patches_per_image=1, max_images=num_images)
-    if len(ds) == 0:
-        print("No images found for visualization.")
-        return
-
-    dl = DataLoader(ds, batch_size=num_images, shuffle=False)
-    x0 = next(iter(dl)).to(DEVICE)
-
-    blur_levels = [i * MAX_TRAINING_BLUR_LEVEL / (num_levels - 1) for i in range(num_levels)]
-
-    rows = [(x0 + 1) / 2]  # Start with original
-
-    print(f"Blur schedule visualization ({BLUR_SCHEDULE}):")
-    for bl in blur_levels[1:]:  # Skip 0.0 since we already have original
-        sigma = get_blur_sigma_from_level(bl, BLUR_SCHEDULE)
-        x_blurred = add_blur_level(x0, bl, BLUR_SCHEDULE)
-        rows.append((x_blurred + 1) / 2)
-        print(f"  Level {bl:.2f}: sigma={sigma:.2f}")
-
-    all_imgs = torch.cat(rows, dim=0)
-    save_path = os.path.join(RESULTS_DIR, f"{tag}.png")
-    save_image(all_imgs, save_path, nrow=num_images)
-    print(f"Saved: {save_path}")
-
 
 # ============================================================
 # 8. MAIN
@@ -1212,14 +1168,8 @@ if __name__ == "__main__":
     visualize_starting_noise(
         MAX_TRAINING_NOISE_LEVEL,
         num=4,
-        tag="pre_train",
-        blur_level=MAX_TRAINING_BLUR_LEVEL if USE_BLUR else 0.0,
-        use_blur=USE_BLUR
+        tag="pre_train"
     )
-
-    # Also visualize the blur schedule if enabled
-    if USE_BLUR:
-        visualize_blur_schedule(num_levels=5, num_images=4, tag="blur_schedule_test")
 
     if DEBUG_NOISE_TEST:
         print(f"\n[DEBUG] Visualizing noise level {MAX_TRAINING_NOISE_LEVEL}")
