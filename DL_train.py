@@ -15,7 +15,6 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
 from torchvision.transforms.functional import rgb_to_grayscale
-import tensordict
 
 import time
 import random
@@ -100,7 +99,7 @@ CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
 DETAIL_WEIGHTS = []
 DETAIL_WEIGHTS_VAL = []
 DETAIL_WEIGHTS_TEST = []
-DETAILS_MAP = tensordict.from_dict({}, device=torch.device(DEVICE))
+DETAILS_MAP = torch.zeros(BATCH_SIZE)
 import re, glob, os
 
 
@@ -357,7 +356,7 @@ def add_noise_level(x0, noise_level):
         return x0
     if alpha <= 0.0:
         return torch.randn_like(x0)
-
+    populate_weights(x0)
     noise = torch.randn_like(x0)
     scale_noise(noise, x0)
 
@@ -840,7 +839,7 @@ def validate_one_epoch(model, dataloader, k_max):
 
 def populate_weights(patches):
     global DETAILS_MAP
-    DETAILS_MAP = tensordict.from_dict({}, device=torch.device(DEVICE))
+    DETAILS_MAP = torch.zeros(len(patches))
     max_detail = -1
 
     for i,patch in enumerate(patches):
@@ -849,8 +848,7 @@ def populate_weights(patches):
         DETAILS_MAP[i] = score
         if score > max_detail:
             DETAILS_MAP = score
-    for key in DETAILS_MAP.keys():
-         DETAILS_MAP[key] = DETAILS_MAP[key] / max_detail
+    DETAILS_MAP /= max_detail
 
 
 def train():
@@ -1036,11 +1034,9 @@ def train():
 # 6. SAMPLING
 # ============================================================
 
-def scale_noise(noise : Tensor, x_i):
+def scale_noise(noise : Tensor):
     #patches in batch
-    for a in range(BATCH_SIZE):
-        wt = DETAILS_MAP[a]
-        noise[a]*=wt
+    noise*DETAILS_MAP
 
 
 
@@ -1126,43 +1122,21 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
     x0 = next(iter(dl)).to(DEVICE)  # [-1,1]
     # Get timestep info for noise
     k = get_timestep_from_noise_level(noise_level, alpha_hat, TIMESTEPS)
+    # Original behavior - just noise
+    xk = add_noise_level(x0, noise_level)
 
-    if use_blur and blur_level > 0:
-        # Generate all four versions
-        x_original = x0
-        x_noised = add_noise_level(x0, noise_level)
+    # Stack: Top row = Original, Bottom row = Noised
+    both = torch.cat([
+        (x0 + 1) / 2,  # original
+        (xk + 1) / 2  # noised
+    ], dim=0)
 
-        # Stack all rows
-        all_imgs = torch.cat([
-            (x_original + 1) / 2,  # Row 1: Original
-            (x_noised + 1) / 2,  # Row 3: Noise only
-        ], dim=0)
+    save_path = os.path.join(RESULTS_DIR, f"noise_vis_level{noise_level:.2f}_{tag}.png")
+    save_image(both, save_path, nrow=num)
 
-        save_path = os.path.join(
-            RESULTS_DIR,
-            f"degradation_vis_noise{noise_level:.2f}_blur{blur_level:.2f}_{tag}.png"
-        )
-        save_image(all_imgs, save_path, nrow=num)
-
-        print(f"Saved visualization: {save_path}")
-        print(f"  Noise level: {noise_level:.2f} (timestep k={k})")
-
-    else:
-        # Original behavior - just noise
-        xk = add_noise_level(x0, noise_level)
-
-        # Stack: Top row = Original, Bottom row = Noised
-        both = torch.cat([
-            (x0 + 1) / 2,  # original
-            (xk + 1) / 2  # noised
-        ], dim=0)
-
-        save_path = os.path.join(RESULTS_DIR, f"noise_vis_level{noise_level:.2f}_{tag}.png")
-        save_image(both, save_path, nrow=num)
-
-        print(f"Saved visualization: {save_path}")
-        print(f"  Noise level: {noise_level:.2f} (timestep k={k})")
-        print(f"  Rows: Original | Noised")
+    print(f"Saved visualization: {save_path}")
+    print(f"  Noise level: {noise_level:.2f} (timestep k={k})")
+    print(f"  Rows: Original | Noised")
 
 
 def visualize_blur_schedule(num_levels=5, num_images=4, tag="blur_schedule"):
