@@ -56,7 +56,7 @@ NOISE_SCHEDULE = "cosine"
 # ============================================================
 LAP = torch.tensor([[0, -1, 0],
                         [-1, 4, -1],
-                        [0, -1, 0]]).float().view(1,1,3,3).to(torch.cuda.is_available())
+                        [0, -1, 0]]).float().view(1,1,3,3).to(torch.device(DEVICE))
 MAX_DETAIL = -1
 # ============================================================
 # GLOBALS
@@ -838,20 +838,19 @@ def validate_one_epoch(model, dataloader, k_max):
         count += x0.shape[0]
     return total_mse/count, total_recon/count, total_hf/count
 
-def populate_weights(dl):
-    for patches in dl:
-        for patch in patches:
-            patch : Tensor
-            score = detail_score(patch)
-            global MAX_DETAIL
-            DETAILS_MAP[str(id(patch))] = score
-            if score > MAX_DETAIL:
-                MAX_DETAIL = score
+def populate_weights(patches):
+    global DETAILS_MAP
+    DETAILS_MAP = tensordict.from_dict({}, device=torch.device(DEVICE))
+    max_detail = -1
 
-
-def normalize_tensdict():
+    for i,patch in enumerate(patches):
+        patch : Tensor
+        score = detail_score(patch)
+        DETAILS_MAP[i] = score
+        if score > max_detail:
+            DETAILS_MAP = score
     for key in DETAILS_MAP.keys():
-        DETAILS_MAP[key] = DETAILS_MAP[key]/MAX_DETAIL
+         DETAILS_MAP[key] = DETAILS_MAP[key] / max_detail
 
 
 def train():
@@ -875,15 +874,6 @@ def train():
     val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE,
                         shuffle=False, num_workers=6,
                         drop_last=False, pin_memory=True)
-
-    # global DETAIL_WEIGHTS, DETAIL_WEIGHTS_VAL
-    # DETAIL_WEIGHTS, DETAIL_WEIGHTS_VAL= [], []
-
-    populate_weights(train_dl), populate_weights(val_dl)
-
-    # DETAIL_WEIGHTS = torch.tensor(DETAIL_WEIGHTS)
-    # DETAIL_WEIGHTS_VAL = torch.tensor(DETAIL_WEIGHTS_VAL)
-    normalize_tensdict()
 
 
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
@@ -928,9 +918,12 @@ def train():
 
         pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{EPOCHS}")
 
+
         for i, x0 in enumerate(pbar):
             x0 = x0.to(DEVICE)
             t = torch.randint(0, k_max + 1, (x0.shape[0],), device=DEVICE).long()
+
+            populate_weights(x0)
 
             # Sample random blur level for this batch (if enabled)
             if USE_BLUR:
@@ -1128,7 +1121,8 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
         return
 
     dl = DataLoader(ds, batch_size=num, shuffle=False)
-    populate_weights(dl)
+    # populate_weights(dl)
+
     x0 = next(iter(dl)).to(DEVICE)  # [-1,1]
     # Get timestep info for noise
     k = get_timestep_from_noise_level(noise_level, alpha_hat, TIMESTEPS)
@@ -1282,7 +1276,7 @@ if __name__ == "__main__":
         MAX_TRAINING_NOISE_LEVEL, alpha_hat, TIMESTEPS
     )
 
-    populate_weights(test_dl)
+    # populate_weights(test_dl)
 
     print(f"Denoising from noise level {MAX_TRAINING_NOISE_LEVEL:.2f} (k={k}) to 0.0...")
 
