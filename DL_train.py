@@ -1,3 +1,4 @@
+from torch import Tensor
 from tqdm import tqdm
 import os
 import math
@@ -14,6 +15,8 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.utils import save_image
 from torchvision.transforms.functional import rgb_to_grayscale
+import tensordict
+
 import time
 import random
 import argparse
@@ -48,10 +51,18 @@ DEBUG_NOISE_TEST = False
 
 MAX_TRAINING_NOISE_LEVEL = 0.25
 NOISE_SCHEDULE = "cosine"
+# ============================================================
+# CONSTANTS
+# ============================================================
+LAP = torch.tensor([[0, -1, 0],
+                        [-1, 4, -1],
+                        [0, -1, 0]]).float().view(1,1,3,3).to(torch.cuda.is_available())
+MAX_DETAIL = -1
+# ============================================================
+# GLOBALS
+# ============================================================
+IMAGE_TO_ID = []
 
-# ============================================================
-# BLUR SCHEDULE CONFIG
-# ============================================================
 USE_BLUR = False  # Toggle blur on/off
 MAX_TRAINING_BLUR_LEVEL = 0.75  # 0.0 = no blur, 1.0 = max blur
 BLUR_SCHEDULE = "cosine"  # "linear" or "cosine"
@@ -86,7 +97,10 @@ LR = 2e-4
 
 # resuming where we left off
 CACHE_IMAGES_IN_MEMORY = True  # Set False if you run out of RAM
-
+DETAIL_WEIGHTS = []
+DETAIL_WEIGHTS_VAL = []
+DETAIL_WEIGHTS_TEST = []
+DETAILS_MAP = tensordict.from_dict({}, device=torch.device(DEVICE))
 import re, glob, os
 
 
@@ -298,12 +312,15 @@ def extract(a, t, x_shape):
     return b.reshape(-1, 1, 1, 1)
 
 
-def q_sample(x0, t, noise=None, detail_weight=1.0):
+def q_sample(x0, t, noise=None):
     if noise is None:
         noise = torch.randn_like(x0)
+    scale_noise(noise, x0)
     a_hat = extract(sqrt_alpha_hat, t, x0.shape)
     om_a = extract(sqrt_one_minus_ahat, t, x0.shape)
-    return a_hat * x0 + om_a * noise * detail_weight
+
+
+    return a_hat * x0 + om_a * noise
 
 
 def add_noise_k(x0, k):
@@ -342,6 +359,8 @@ def add_noise_level(x0, noise_level):
         return torch.randn_like(x0)
 
     noise = torch.randn_like(x0)
+    scale_noise(noise, x0)
+
     sqrt_alpha = math.sqrt(alpha)
     sqrt_one_minus_alpha = math.sqrt(1.0 - alpha)
 
@@ -488,17 +507,11 @@ def add_noise_and_blur(x0, noise_level, blur_level, blur_schedule="linear"):
 
     return x_degraded
 
-def detail_score(x0):
+def detail_score(patch):
     # image = PIL image
-    x = x0.unsqueeze(0)          # [1,3,H,W]
-    x = rgb_to_grayscale(x)                   # [1,1,H,W]
-
-    # Laplacian kernel (simple high-pass)
-    lap = torch.tensor([[0, -1, 0],
-                        [-1, 4, -1],
-                        [0, -1, 0]]).float().view(1,1,3,3).to(x.device)
-
-    edges = F.conv2d(x, lap)
+    p = patch.unsqueeze(0)          # [1,3,H,W]
+    p = rgb_to_grayscale(p)
+    edges = F.conv2d(p, LAP)
     return edges.abs().mean().item()
 
 
@@ -730,8 +743,6 @@ def p_losses(
     mse_weight=1.0,
     recon_weight=0.5,
     hf_weight=0.5,
-    use_blur=False,
-    blur_level=0.0, detail_weight=1.0
 ):
     """
     Combined loss:
@@ -740,23 +751,16 @@ def p_losses(
     - high-frequency loss between x0_pred and clean x0
     """
     noise = torch.randn_like(x0)
-
-    # Apply blur to x0 before adding noise if enabled
-    if use_blur and blur_level > 0:
-        x0_processed = add_blur_level(x0, blur_level, BLUR_SCHEDULE)
-    else:
-        x0_processed = x0
-
     # Forward diffusion: q(x_t | x0_processed, t)
-    x_t = q_sample(x0_processed, t, noise, detail_weight)
+    x_t = q_sample(x0, t, noise)
 
-    # Predict noise
-    noise_pred = model(x_t, t)
 
-    # 1) Standard MSE on noise
+    noise_pred = model(x_t, t) # Scale prediction?
+
+    # standard mse
     mse_loss = F.mse_loss(noise_pred, noise)
 
-    # 2) Reconstruct x0 from predicted noise
+    # reconstruct x0 from predicted noise
     a_hat_t = extract(sqrt_alpha_hat, t, x_t.shape)
     sqrt_one_minus_ahat_t = extract(sqrt_one_minus_ahat, t, x_t.shape)
 
@@ -787,9 +791,9 @@ def p_losses(
 def partition_data():
     all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
     random.shuffle(all_paths)
-    train_portion = .8
+    train_portion = .9
     val_portion = .1
-    test_portion = .1
+    test_portion = 0
     train_size = math.floor(len(all_paths) * train_portion)
     val_size = math.floor(len(all_paths) * val_portion)
     test_size = math.floor(len(all_paths) * test_portion)
@@ -827,13 +831,27 @@ def validate_one_epoch(model, dataloader, k_max):
         x0 = x0.to(DEVICE)
         t = torch.randint(0, k_max+1, (x0.shape[0],), device=DEVICE).long()
         _, mse, recon, hf = p_losses(model, x0, t,
-                                     mse_weight=1.0, recon_weight=0.5, hf_weight=0.5,
-                                     use_blur=False, blur_level=0.0)   # NO blur at val
+                                     mse_weight=1.0, recon_weight=0.5, hf_weight=0.5)
         total_mse += mse * x0.shape[0]
         total_recon += recon * x0.shape[0]
         total_hf += hf * x0.shape[0]
         count += x0.shape[0]
     return total_mse/count, total_recon/count, total_hf/count
+
+def populate_weights(dl):
+    for patches in dl:
+        for patch in patches:
+            patch : Tensor
+            score = detail_score(patch)
+            global MAX_DETAIL
+            DETAILS_MAP[str(id(patch))] = score
+            if score > MAX_DETAIL:
+                MAX_DETAIL = score
+
+
+def normalize_tensdict():
+    for key in DETAILS_MAP.keys():
+        DETAILS_MAP[key] = DETAILS_MAP[key]/MAX_DETAIL
 
 
 def train():
@@ -844,7 +862,7 @@ def train():
     print(f"Native resolution textures - no downsampling")
 
     # Optimized DataLoader
-    dl = DataLoader(
+    train_dl = DataLoader(
         train_ds,
         batch_size=BATCH_SIZE,
         shuffle=True,
@@ -858,10 +876,15 @@ def train():
                         shuffle=False, num_workers=6,
                         drop_last=False, pin_memory=True)
 
+    # global DETAIL_WEIGHTS, DETAIL_WEIGHTS_VAL
+    # DETAIL_WEIGHTS, DETAIL_WEIGHTS_VAL= [], []
 
-    detail_weights = torch.tensor([detail_score(dl[i]) for i in range(len(dl))])
+    populate_weights(train_dl), populate_weights(val_dl)
 
-    F.normalize(detail_weights)
+    # DETAIL_WEIGHTS = torch.tensor(DETAIL_WEIGHTS)
+    # DETAIL_WEIGHTS_VAL = torch.tensor(DETAIL_WEIGHTS_VAL)
+    normalize_tensdict()
+
 
     print(f"Using PATCH training: {PATCH_SIZE}x{PATCH_SIZE} patches")
     print(f"Native resolution textures - no downsampling")
@@ -893,8 +916,9 @@ def train():
     else:
         print(f"Blur DISABLED")
     print(f"Dataset size: {len(train_ds)}")
-    print(f"Batches per epoch: {len(dl)}")
+    print(f"Batches per epoch: {len(train_dl)}")
 
+    dl = train_dl
     for epoch in range(EPOCHS):
         model.train()
         epoch_loss = 0.0
@@ -906,7 +930,6 @@ def train():
 
         for i, x0 in enumerate(pbar):
             x0 = x0.to(DEVICE)
-
             t = torch.randint(0, k_max + 1, (x0.shape[0],), device=DEVICE).long()
 
             # Sample random blur level for this batch (if enabled)
@@ -923,7 +946,7 @@ def train():
                 recon_weight=0.5,
                 hf_weight=0.5,
                 use_blur=USE_BLUR,
-                blur_level=batch_blur_level, detail_weight=detail_weights[i]
+                blur_level=batch_blur_level
             )
 
             opt.zero_grad()
@@ -1020,6 +1043,14 @@ def train():
 # 6. SAMPLING
 # ============================================================
 
+def scale_noise(noise : Tensor, x_i):
+    #patches in batch
+    for a in range(BATCH_SIZE):
+        wt = DETAILS_MAP[str(id(x_i[a]))]
+        noise[a]*=wt
+
+
+
 @torch.no_grad()
 def p_sample(model, x_t, t):
     betas_t = extract(betas, t, x_t.shape)
@@ -1032,6 +1063,7 @@ def p_sample(model, x_t, t):
 
     if t[0] > 0:
         noise = torch.randn_like(x_t)
+        scale_noise(noise, x_t)
         var = betas_t
         sample = mean + torch.sqrt(var) * noise
     else:
@@ -1104,19 +1136,12 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
     if use_blur and blur_level > 0:
         # Generate all four versions
         x_original = x0
-        x_blurred = add_blur_level(x0, blur_level, BLUR_SCHEDULE)
         x_noised = add_noise_level(x0, noise_level)
-        x_blur_noise = add_noise_and_blur(x0, noise_level, blur_level, BLUR_SCHEDULE)
-
-        # Get blur sigma for logging
-        blur_sigma = get_blur_sigma_from_level(blur_level, BLUR_SCHEDULE)
 
         # Stack all rows
         all_imgs = torch.cat([
             (x_original + 1) / 2,  # Row 1: Original
-            (x_blurred + 1) / 2,  # Row 2: Blur only
             (x_noised + 1) / 2,  # Row 3: Noise only
-            (x_blur_noise + 1) / 2,  # Row 4: Blur + Noise
         ], dim=0)
 
         save_path = os.path.join(
@@ -1127,8 +1152,6 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
 
         print(f"Saved visualization: {save_path}")
         print(f"  Noise level: {noise_level:.2f} (timestep k={k})")
-        print(f"  Blur level: {blur_level:.2f} (sigma={blur_sigma:.2f})")
-        print(f"  Rows: Original | Blur only | Noise only | Blur+Noise")
 
     else:
         # Original behavior - just noise
@@ -1259,15 +1282,11 @@ if __name__ == "__main__":
         MAX_TRAINING_NOISE_LEVEL, alpha_hat, TIMESTEPS
     )
 
+    populate_weights(test_dl)
+
     print(f"Denoising from noise level {MAX_TRAINING_NOISE_LEVEL:.2f} (k={k}) to 0.0...")
 
-    # Apply blur + noise if enabled
-    if USE_BLUR:
-        xk_batch = add_noise_and_blur(x0_batch, MAX_TRAINING_NOISE_LEVEL,
-                                      MAX_TRAINING_BLUR_LEVEL, BLUR_SCHEDULE)
-        print(f"Also deblurring from blur level {MAX_TRAINING_BLUR_LEVEL:.2f}")
-    else:
-        xk_batch = add_noise_k(x0_batch, k)
+    xk_batch = add_noise_k(x0_batch, k)
 
     x_denoised = sample_from_partial(model, xk_batch, k)
 
