@@ -1128,8 +1128,8 @@ def visualize_starting_noise(noise_level, num=4, tag="check",
         return
 
     dl = DataLoader(ds, batch_size=num, shuffle=False)
+    populate_weights(dl)
     x0 = next(iter(dl)).to(DEVICE)  # [-1,1]
-
     # Get timestep info for noise
     k = get_timestep_from_noise_level(noise_level, alpha_hat, TIMESTEPS)
 
