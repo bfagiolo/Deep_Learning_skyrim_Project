@@ -55,7 +55,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 DEBUG_FAST_RUN = False
 DEBUG_NOISE_TEST = False
 
-MAX_TRAINING_NOISE_LEVEL = 0.25
+MAX_TRAINING_NOISE_LEVEL = 0.20
 NOISE_SCHEDULE = "cosine"
 # ============================================================
 # CONSTANTS
@@ -522,10 +522,10 @@ def add_noise_and_blur(x0, noise_level, blur_level, blur_schedule="linear"):
 
     return x_degraded
 
-def detail_score(patches, saturation_based=True):
+def detail_score(patches, contrast_based=True):
     # image = PIL image
     p = rgb_to_grayscale(patches)
-    if saturation_based:
+    if contrast_based:
         contrast_scores = torch.std(p, dim=(1, 2, 3))
         return contrast_scores.squeeze()
     else:
@@ -762,9 +762,9 @@ def p_losses(
     model,
     x0,
     t,
-    mse_weight=1.0,
+    mse_weight=.9,
     recon_weight=0.5,
-    hf_weight=0.5, scale=False
+    hf_weight=0.6, scale=False
 ):
     """
     Combined loss:
