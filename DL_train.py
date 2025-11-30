@@ -27,6 +27,8 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-d', type=str, help="the data key of the set. EX: STONE-ARCH for stone and architecture textures.")
+
+parser.add_argument('-c', type=str, help="cache or not")
 args = parser.parse_args()
 # ============================================================
 # 1. CONFIG
@@ -77,7 +79,7 @@ MIN_BLUR_SIGMA = 0.0  # Minimum blur sigma at blur_level=0.0
 PATCH_SIZE = 256
 PATCHES_PER_IMAGE = 4
 
-SAVE_EVERY_N = 5
+SAVE_EVERY_N = 2
 CHECKPOINT_FREQ = 10
 
 if DEBUG_FAST_RUN:
@@ -101,6 +103,8 @@ LR = 2e-4
 
 # resuming where we left off
 CACHE_IMAGES_IN_MEMORY = False  # Set False if you run out of RAM
+if args.__contains__("c"):
+    CACHE_IMAGES_IN_MEMORY = True
 DETAIL_WEIGHTS = []
 DETAIL_WEIGHTS_VAL = []
 DETAIL_WEIGHTS_TEST = []
@@ -204,7 +208,8 @@ class PatchTextureDataset(Dataset):
             print(f"Caching {len(self.paths)} images in memory...")
             for p in tqdm(self.paths, desc="Loading images"):
                 try:
-                    img = Image.open(p).convert("RGB")
+                    img = Image.open(p)
+                    if img.mode != 'RGB': img = img.convert('RGB')
                     self.image_cache[p] = self.transform(img)
                 except Exception as e:
                     print(f"Failed to cache {p}: {e}")
@@ -222,7 +227,8 @@ class PatchTextureDataset(Dataset):
         if self.cache_in_memory and path in self.image_cache:
             img = self.image_cache[path].clone()
         else:
-            img = Image.open(path).convert("RGB")
+            img = Image.open(path)
+            if img.mode != 'RGB': img = img.convert('RGB')
             img = self.transform(img)
 
         # Extract random patch
@@ -291,12 +297,17 @@ def get_alpha_from_noise_level(noise_level):
     The relationship: alpha = 1 - noise_level
     This gives us: x_noisy = sqrt(alpha)*x0 + sqrt(1-alpha)*noise
     """
-    noise_level = max(0.0, min(1.0, noise_level))
-    alpha = 1.0 - noise_level
+    print(noise_level.shape)
+    lv = torch.clamp(noise_level,min=.5*MAX_TRAINING_NOISE_LEVEL, max=MAX_TRAINING_NOISE_LEVEL)
+
+    print(noise_level.shape)
+    alpha = lv*-1+ 1
+
+    print(noise_level.shape)
     return alpha
 
 
-def get_timestep_from_noise_level(noise_level, alpha_hat_tensor, timesteps):
+def get_timestep_from_noise_level(noise_level, alpha_hat_tensor):
     """
     Find the timestep index that corresponds to the desired noise level.
     This maps our continuous noise level [0,1] to a discrete timestep.
@@ -305,21 +316,32 @@ def get_timestep_from_noise_level(noise_level, alpha_hat_tensor, timesteps):
     - Linear schedule: roughly linear mapping
     - Cosine schedule: more timesteps spent at low noise levels
     """
-    target_alpha = get_alpha_from_noise_level(noise_level)
-    diffs = torch.abs(alpha_hat_tensor.cpu() - target_alpha)
-    k = torch.argmin(diffs).item()
-    return min(k, timesteps - 1)
+    if len(noise_level.shape) == 0:
+        noise_level = noise_level.reshape((1,))
+
+    # B x 1
+    target_alpha = get_alpha_from_noise_level(noise_level).unsqueeze(1)
+
+    # B x T
+    alpha_h = alpha_hat_tensor.unsqueeze(0).repeat(target_alpha.shape[0], 1)
+
+    assert alpha_h.shape == (target_alpha.shape[0],TIMESTEPS)
+    diffs = torch.abs(alpha_h - target_alpha)
+
+    # Get the index of the closest alpha for each item in the batch
+    timestep_indices = torch.argmin(diffs, dim=1)
+
+    return timestep_indices
 
 
-def extract(a, t, x_shape):
-    b = a.gather(-1, t)
-    return b.reshape(-1, 1, 1, 1)
 
 
-def q_sample(x0, t, noise=None):
+def q_sample(x0, t, noise=None, scale=False):
     if noise is None:
         noise = torch.randn_like(x0)
-    scale_noise(noise)
+    if scale:
+        populate_weights()
+        noise = scale_noise(noise, x0)
     a_hat = extract(sqrt_alpha_hat, t, x0.shape)
     om_a = extract(sqrt_one_minus_ahat, t, x0.shape)
 
@@ -327,18 +349,17 @@ def q_sample(x0, t, noise=None):
     return a_hat * x0 + om_a * noise
 
 
-def add_noise_k(x0, k):
+def add_noise_k(x0, t_indices: Tensor):  # Changed k to t_indices, added type hint
     """
     ADD K STEPS OF NOISE using the schedule.
-    k is an integer 0 <= k < TIMESTEPS that indexes into our schedule.
+    k is a tensor of indices [B] that indexes into our schedule.
     """
-    k = min(k, TIMESTEPS - 1)
-    if k < 0:
-        raise ValueError(f"k must be non-negative, got {k}")
+    if t_indices.dtype != torch.long:
+        # Ensure the tensor is long type for indexing
+        t_indices = t_indices.long()
 
-    bsz = x0.shape[0]
-    t = torch.full((bsz,), k, device=x0.device, dtype=torch.long)
-    x_k = q_sample(x0, t)
+    # t is now t_indices, representing the timestep for each sample.
+    x_k = q_sample(x0, t_indices)
     return x_k
 
 
@@ -355,21 +376,15 @@ def add_noise_level(x0, noise_level):
 
     This is independent of the schedule - it's a direct noise injection.
     """
-    alpha = get_alpha_from_noise_level(noise_level)
-
-    if alpha >= 1.0:
-        return x0
-    if alpha <= 0.0:
-        return torch.randn_like(x0)
+    wt = detail_score(x0)
+    w_nl = wt*noise_level
+    alpha = get_alpha_from_noise_level(w_nl)
     noise = torch.randn_like(x0)
-
-    populate_weights(x0)
-    scale_noise(noise, x0)
-
-    sqrt_alpha = math.sqrt(alpha)
-    sqrt_one_minus_alpha = math.sqrt(1.0 - alpha)
-
-    return sqrt_alpha * x0 + sqrt_one_minus_alpha * noise
+    sqrt_alpha = torch.sqrt(alpha).view(-1,1,1,1)
+    sqrt_one_minus_alpha = torch.sqrt((alpha-1.0)*-1).view(-1,1,1,1)
+    if len(x0.shape) == 3:
+        x0 = x0.unsqueeze(0)
+    return (sqrt_alpha * x0) + sqrt_one_minus_alpha * noise
 
 
 # ============================================================
@@ -512,11 +527,15 @@ def add_noise_and_blur(x0, noise_level, blur_level, blur_schedule="linear"):
 
     return x_degraded
 
-def detail_score(patches):
+def detail_score(patches, saturation_based=True):
     # image = PIL image
     p = rgb_to_grayscale(patches)
-    edges = F.conv2d(p, LAP, padding=1)
-    return edges.abs().mean(dim=(1, 2, 3)).squeeze()
+    if saturation_based:
+        contrast_scores = torch.std(p, dim=(1, 2, 3))
+        return contrast_scores.squeeze()
+    else:
+        edges = F.conv2d(p, LAP, padding=1)
+        return edges.abs().mean(dim=(1, 2, 3)).squeeze()
 
 
 # ============================================================
@@ -739,6 +758,10 @@ def high_frequency_loss(pred, target):
 
     return F.l1_loss(pred_hf, target_hf)
 
+def extract(a, t, x_shape):
+    b = a.gather(-1, t)
+    out_shape = (t.shape[0],) + (1,) * (len(x_shape) - 1)
+    return b.reshape(out_shape)
 
 def p_losses(
     model,
@@ -746,7 +769,7 @@ def p_losses(
     t,
     mse_weight=1.0,
     recon_weight=0.5,
-    hf_weight=0.5,
+    hf_weight=0.5, scale=False
 ):
     """
     Combined loss:
@@ -756,7 +779,7 @@ def p_losses(
     """
     noise = torch.randn_like(x0)
     # Forward diffusion: q(x_t | x0_processed, t)
-    x_t = q_sample(x0, t, noise)
+    x_t = q_sample(x0, t, noise, scale)
 
 
     noise_pred = model(x_t, t) # Scale prediction?
@@ -768,7 +791,6 @@ def p_losses(
     a_hat_t = extract(sqrt_alpha_hat, t, x_t.shape)
     sqrt_one_minus_ahat_t = extract(sqrt_one_minus_ahat, t, x_t.shape)
 
-    # x0_pred = (x_t - sqrt(1 - alpha_hat_t) * eps_theta) / sqrt(alpha_hat_t)
     x0_pred = (x_t - sqrt_one_minus_ahat_t * noise_pred) / a_hat_t
     x0_pred = x0_pred.clamp(-1.0, 1.0)
 
@@ -848,11 +870,10 @@ def distribute_weights():
     c = 1.2
     h = 10.0
     global DETAILS_MAP
-    DETAILS_MAP = torch.clamp(torch.atan(DETAILS_MAP*h - b)*a + c, 0, 1)
+    DETAILS_MAP = torch.clamp(torch.tan(DETAILS_MAP*h - b)*a + c, 0, 1)
 
 @torch.no_grad()
 def populate_weights(patches : Tensor):
-    patches.squeeze()
     global DETAILS_MAP
     DETAILS_MAP = detail_score(patches)
     w_max = max(DETAILS_MAP).item()
@@ -892,8 +913,8 @@ def train():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, EPOCHS)
 
     k_max = get_timestep_from_noise_level(
-        MAX_TRAINING_NOISE_LEVEL, alpha_hat, TIMESTEPS
-    )
+        torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE), alpha_hat
+    ).item()
 
     # ---- automatic resume ----
     start_epoch = _load_latest(model, opt, scheduler, DEVICE)
@@ -929,8 +950,6 @@ def train():
         for i, x0 in enumerate(pbar):
             x0 = x0.to(DEVICE)
             t = torch.randint(0, k_max + 1, (x0.shape[0],), device=DEVICE).long()
-
-            populate_weights(x0)
 
             # Sample random blur level for this batch (if enabled)
             if USE_BLUR:
@@ -994,18 +1013,12 @@ def train():
                 # k_test = k_max // 2
 
                 # attempt to remove total amount of noise we expect to add
-                k_test = k_max
+                wt = detail_score(x_test)
+                t_test = get_timestep_from_noise_level(noise_level=MAX_TRAINING_NOISE_LEVEL*wt, alpha_hat_tensor=sqrt_alpha_hat)
 
-                # Apply blur if enabled
-                if USE_BLUR:
-                    x_test_processed = add_blur_level(x_test, MAX_TRAINING_BLUR_LEVEL / 2, BLUR_SCHEDULE)
-                else:
-                    x_test_processed = x_test
-
-                x_noisy = add_noise_k(x_test_processed, k_test)
+                x_noisy = add_noise_k(x_test, t_test)
 
                 # Quick denoising visualization
-                t_test = torch.full((3,), k_test, device=DEVICE, dtype=torch.long)
                 noise_pred = model(x_noisy, t_test)
 
                 # Approximate denoised image using predicted noise (one-step)
@@ -1041,14 +1054,14 @@ def train():
 # 6. SAMPLING
 # ============================================================
 
-def scale_noise(noise : Tensor, *kwargs):
+def scale_noise(noise : Tensor, *kwargs) -> Tensor:
     if len(kwargs) > 0:
         x0 = kwargs[0]
         n = x0.shape[0]
     else:
         n = BATCH_SIZE
 
-    noise*DETAILS_MAP.reshape((n,1,1,1))
+    return noise*DETAILS_MAP.reshape((n,1,1,1))
 
 
 
@@ -1075,14 +1088,13 @@ def p_sample(model, x_t, t):
 
 @torch.no_grad()
 def sample_from_partial(model, x_k, k):
-    k = min(k, TIMESTEPS - 1)
-    img = x_k
+    for i, k_i in enumerate(k):
+        img = x_k[i]
+        for t_step in reversed(range(k_i + 1)):
+            t = torch.full((img.shape[0],), t_step, device=DEVICE, dtype=torch.long)
+            x_k[i] = p_sample(model, img, t)
 
-    for t_step in reversed(range(k + 1)):
-        t = torch.full((img.shape[0],), t_step, device=DEVICE, dtype=torch.long)
-        img = p_sample(model, img, t)
-
-    return img.clamp(-1, 1)
+    return x_k.clamp(-1, 1)
 
 
 # ============================================================
@@ -1109,9 +1121,10 @@ def visualize_starting_noise(noise_level, num=4, tag="check"):
 
     x0 = next(iter(dl)).to(DEVICE)  # [-1,1]
     # Get timestep info for noise
-    k = get_timestep_from_noise_level(noise_level, alpha_hat, TIMESTEPS)
+    noise_level_tensor = detail_score(x0)
+    noise_level_tensor = noise_level_tensor * noise_level
     # Original behavior - just noise
-    xk = add_noise_level(x0, noise_level)
+    xk = add_noise_level(x0, noise_level_tensor)
 
     # Stack: Top row = Original, Bottom row = Noised
     both = torch.cat([
@@ -1123,7 +1136,7 @@ def visualize_starting_noise(noise_level, num=4, tag="check"):
     save_image(both, save_path, nrow=num)
 
     print(f"Saved visualization: {save_path}")
-    print(f"  Noise level: {noise_level:.2f} (timestep k={k})")
+    print(f"  Noise level: {noise_level:.2f}")
     print(f"  Rows: Original | Noised")
 
 # ============================================================
@@ -1159,8 +1172,8 @@ if __name__ == "__main__":
 
     # Calculate which timestep corresponds to our noise level
     k_start = get_timestep_from_noise_level(
-        MAX_TRAINING_NOISE_LEVEL, alpha_hat, TIMESTEPS
-    )
+        torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE), alpha_hat
+    ).item()
     print(f"Noise level {MAX_TRAINING_NOISE_LEVEL:.2f} maps to timestep k={k_start}/{TIMESTEPS}")
     print("=" * 60)
 
@@ -1195,17 +1208,12 @@ if __name__ == "__main__":
     test_dl = DataLoader(test_dataset, batch_size=4, shuffle=False)
     x0_batch = next(iter(test_dl)).to(DEVICE)
 
-    # Get timestep for our noise level
-    k = get_timestep_from_noise_level(
-        MAX_TRAINING_NOISE_LEVEL, alpha_hat, TIMESTEPS
-    )
-
     # populate_weights(test_dl)
+    noise_level_tensor = torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE)
+    k = get_timestep_from_noise_level(noise_level_tensor, alpha_hat)
+    print(f"Denoising from noise level {MAX_TRAINING_NOISE_LEVEL:.2f}")
 
-    print(f"Denoising from noise level {MAX_TRAINING_NOISE_LEVEL:.2f} (k={k}) to 0.0...")
-
-    xk_batch = add_noise_k(x0_batch, k)
-
+    xk_batch = add_noise_level(x0_batch, noise_level_tensor)
     x_denoised = sample_from_partial(model, xk_batch, k)
 
     all_imgs = torch.cat([
