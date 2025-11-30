@@ -25,6 +25,15 @@ import time
 import random
 import argparse
 
+from DL_test import (
+    prepare_test_dataset, 
+    calculate_psnr,
+    calculate_ssim_batch,
+    calculate_metrics,
+    save_comparisons,
+    test
+)
+
 parser = argparse.ArgumentParser()
 parser.add_argument('-d', type=str, help="the data key of the set. EX: STONE-ARCH for stone and architecture textures.")
 
@@ -38,7 +47,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS": "png_input/normals/",
                 "PLANTS": "png_input/diffuse/organized_textures/nature_foliage/",
-                "SNOW": "png_input/diffuse/organized_textures/snow_ice/",
                 "ARCHIT": "png_input/diffuse/organized_textures/stone_masonry/",
                 "TERRAIN": "png_input/diffuse/organized_textures/terrain_dirt/",
                 "CLOTHING": "png_input/diffuse/organized_textures/armors/"}
@@ -811,19 +819,32 @@ def p_losses(
 
 def partition_data():
     all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
+    all_paths = [p for p in all_paths 
+                 if os.path.isfile(p) 
+                 and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
+    
+    # CRITICAL: Use fixed seed for reproducible splits
+    random.seed(42)
     random.shuffle(all_paths)
-    train_portion = .9
-    val_portion = .1
-    test_portion = 0
-    train_size = math.floor(len(all_paths) * train_portion)
-    val_size = math.floor(len(all_paths) * val_portion)
-    test_size = math.floor(len(all_paths) * test_portion)
+    random.seed(None)  # Reset seed after shuffling
+    
+    # Calculate split sizes
+    total = len(all_paths)
+    train_size = int(total * 0.8)
+    val_size = int(total * 0.1)
+    # test_size is the remainder
+    
+    # Split the paths
+    train_paths = all_paths[:train_size]
+    val_paths = all_paths[train_size:train_size + val_size]
+    test_paths = all_paths[train_size + val_size:]
+    
+    # Create datasets
     train_ds = PatchTextureDataset(
         root_dir=TEXTURE_DIR,
         patch_size=PATCH_SIZE,
         patches_per_image=PATCHES_PER_IMAGE,
-        max_images=train_size,
-        paths=all_paths[:train_size],
+        paths=train_paths,
         cache_in_memory=CACHE_IMAGES_IN_MEMORY,
     )
 
@@ -831,16 +852,18 @@ def partition_data():
         root_dir=TEXTURE_DIR,
         patch_size=PATCH_SIZE,
         patches_per_image=PATCHES_PER_IMAGE,
-        paths=all_paths[train_size:(val_size+train_size)],
+        paths=val_paths,
         cache_in_memory=CACHE_IMAGES_IN_MEMORY,
     )
+    
     test_ds = PatchTextureDataset(
         root_dir=TEXTURE_DIR,
         patch_size=PATCH_SIZE,
         patches_per_image=PATCHES_PER_IMAGE,
-        paths=all_paths[val_size+train_size:],
+        paths=test_paths,
         cache_in_memory=CACHE_IMAGES_IN_MEMORY,
     )
+    
     return train_ds, val_ds, test_ds
 
 
@@ -1072,7 +1095,6 @@ def p_sample(model, x_t, t):
 
     if t[0] > 0:
         noise = torch.randn_like(x_t)
-        scale_noise(noise)
         var = betas_t
         sample = mean + torch.sqrt(var) * noise
     else:
@@ -1083,13 +1105,21 @@ def p_sample(model, x_t, t):
 
 @torch.no_grad()
 def sample_from_partial(model, x_k, k):
-    for i, k_i in enumerate(k):
-        img = x_k[i]
-        for t_step in reversed(range(k_i + 1)):
-            t = torch.full((img.shape[0],), t_step, device=DEVICE, dtype=torch.long)
-            x_k[i] = p_sample(model, img, t)
+    wt = detail_score(x_k)
+    t_test = get_timestep_from_noise_level(noise_level=MAX_TRAINING_NOISE_LEVEL*wt, alpha_hat_tensor=sqrt_alpha_hat)
 
-    return x_k.clamp(-1, 1)
+    x_noisy = add_noise_k(x_k, t_test)
+
+    # Quick denoising visualization
+    noise_pred = model(x_noisy, t_test)
+
+    # Approximate denoised image using predicted noise (one-step)
+    # x0_pred ≈ (x_noisy - sqrt(1-alpha_hat) * noise_pred) / sqrt(alpha_hat)
+    alpha_hat_t = extract(alpha_hat, t_test, x_noisy.shape)
+    sqrt_alpha_hat_t = torch.sqrt(alpha_hat_t)
+    sqrt_one_minus_ahat_t = torch.sqrt(1.0 - alpha_hat_t)
+
+    return ((x_noisy - sqrt_one_minus_ahat_t * noise_pred) / sqrt_alpha_hat_t).clamp(-1, 1)
 
 
 # ============================================================
@@ -1139,87 +1169,102 @@ def visualize_starting_noise(noise_level, num=4, tag="check"):
 # ============================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("PATCH-BASED TEXTURE DIFFUSION UPSCALER")
-    print("=" * 60)
-    print(f"Device: {DEVICE}")
-    print(f"Patch Size: {PATCH_SIZE}x{PATCH_SIZE}")
-    print(f"Timesteps: {TIMESTEPS} (sampling granularity)")
-    print(f"Noise Schedule: {NOISE_SCHEDULE}")
-    print(f"Base Channels: {CHANNELS}")
-    print(f"Max Training Noise Level: {MAX_TRAINING_NOISE_LEVEL}")
+    _type = "test"
+    if _type == "train":
+        print("=" * 60)
+        print("PATCH-BASED TEXTURE DIFFUSION UPSCALER")
+        print("=" * 60)
+        print(f"Device: {DEVICE}")
+        print(f"Patch Size: {PATCH_SIZE}x{PATCH_SIZE}")
+        print(f"Timesteps: {TIMESTEPS} (sampling granularity)")
+        print(f"Noise Schedule: {NOISE_SCHEDULE}")
+        print(f"Base Channels: {CHANNELS}")
+        print(f"Max Training Noise Level: {MAX_TRAINING_NOISE_LEVEL}")
 
-    # Print blur config
-    print("-" * 40)
-    print(f"Blur Enabled: {USE_BLUR}")
-    if USE_BLUR:
-        print(f"Max Training Blur Level: {MAX_TRAINING_BLUR_LEVEL}")
-        print(f"Blur Schedule: {BLUR_SCHEDULE}")
-        print(f"Blur Sigma Range: {MIN_BLUR_SIGMA} to {MAX_BLUR_SIGMA}")
-        max_sigma = get_blur_sigma_from_level(MAX_TRAINING_BLUR_LEVEL, BLUR_SCHEDULE)
-        print(f"Max Training Blur Sigma: {max_sigma:.2f}")
-    print("-" * 40)
-
-    dataset_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
-    dataset_paths = [p for p in dataset_paths if os.path.isfile(p)
-                     and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
-    print(f"\nFound {len(dataset_paths)} texture files")
-
-    # Calculate which timestep corresponds to our noise level
-    k_start = get_timestep_from_noise_level(
-        torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE), alpha_hat
-    ).item()
-    print(f"Noise level {MAX_TRAINING_NOISE_LEVEL:.2f} maps to timestep k={k_start}/{TIMESTEPS}")
-    print("=" * 60)
-
-    # TEST STARTING NOISE/BLUR LEVEL FIRST
-    visualize_starting_noise(
-        MAX_TRAINING_NOISE_LEVEL,
-        num=4,
-        tag="pre_train"
-    )
-
-    if DEBUG_NOISE_TEST:
-        print(f"\n[DEBUG] Visualizing noise level {MAX_TRAINING_NOISE_LEVEL}")
+        # Print blur config
+        print("-" * 40)
+        print(f"Blur Enabled: {USE_BLUR}")
         if USE_BLUR:
-            print(f"[DEBUG] Visualizing blur level {MAX_TRAINING_BLUR_LEVEL}")
-        exit()
+            print(f"Max Training Blur Level: {MAX_TRAINING_BLUR_LEVEL}")
+            print(f"Blur Schedule: {BLUR_SCHEDULE}")
+            print(f"Blur Sigma Range: {MIN_BLUR_SIGMA} to {MAX_BLUR_SIGMA}")
+            max_sigma = get_blur_sigma_from_level(MAX_TRAINING_BLUR_LEVEL, BLUR_SCHEDULE)
+            print(f"Max Training Blur Sigma: {max_sigma:.2f}")
+        print("-" * 40)
 
-    # Train
-    train()
+        dataset_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
+        dataset_paths = [p for p in dataset_paths if os.path.isfile(p)
+                        and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
+        print(f"\nFound {len(dataset_paths)} texture files")
 
-    # Load and test
-    print("\nLoading model for testing...")
-    model = TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE)
-    model.load_state_dict(
-        torch.load(os.path.join(MODEL_DIR, "texture_diffusion.pth"),
-                   map_location=DEVICE)
-    )
-    model.eval()
+        # Calculate which timestep corresponds to our noise level
+        k_start = get_timestep_from_noise_level(
+            torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE), alpha_hat
+        ).item()
+        print(f"Noise level {MAX_TRAINING_NOISE_LEVEL:.2f} maps to timestep k={k_start}/{TIMESTEPS}")
+        print("=" * 60)
 
-    # Test denoising on patches
-    test_dataset = PatchTextureDataset(TEXTURE_DIR, patch_size=PATCH_SIZE,
-                                       patches_per_image=1, max_images=4)
-    test_dl = DataLoader(test_dataset, batch_size=4, shuffle=False)
-    x0_batch = next(iter(test_dl)).to(DEVICE)
+        # TEST STARTING NOISE/BLUR LEVEL FIRST
+        visualize_starting_noise(
+            MAX_TRAINING_NOISE_LEVEL,
+            num=4,
+            tag="pre_train"
+        )
 
-    # populate_weights(test_dl)
-    noise_level_tensor = torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE)
-    k = get_timestep_from_noise_level(noise_level_tensor, alpha_hat)
-    print(f"Denoising from noise level {MAX_TRAINING_NOISE_LEVEL:.2f}")
+        if DEBUG_NOISE_TEST:
+            print(f"\n[DEBUG] Visualizing noise level {MAX_TRAINING_NOISE_LEVEL}")
+            if USE_BLUR:
+                print(f"[DEBUG] Visualizing blur level {MAX_TRAINING_BLUR_LEVEL}")
+            exit()
 
-    xk_batch = add_noise_level(x0_batch, noise_level_tensor)
-    x_denoised = sample_from_partial(model, xk_batch, k)
+        # Train
+        train()
 
-    all_imgs = torch.cat([
-        (x0_batch + 1) / 2,  # Original patches (clean)
-        (xk_batch + 1) / 2,  # Degraded (noise + optional blur)
-        (x_denoised + 1) / 2  # Denoised/deblurred result
-    ], dim=0)
+        # Load and test
+        print("\nLoading model for testing...")
+        model = TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE)
+        model.load_state_dict(
+            torch.load(os.path.join(MODEL_DIR, "texture_diffusion.pth"),
+                    map_location=DEVICE)
+        )
+        model.eval()
 
-    save_image(all_imgs, os.path.join(RESULTS_DIR, "final_comparison.png"), nrow=4)
-    print(f"\nResults saved to {RESULTS_DIR}")
-    if USE_BLUR:
-        print(f"Rows: Original | Degraded (noise+blur) | Restored")
-    else:
-        print(f"Rows: Original (0.0) | Noised ({MAX_TRAINING_NOISE_LEVEL:.2f}) | Denoised")
+        # Test denoising on patches
+        test_dataset = PatchTextureDataset(TEXTURE_DIR, patch_size=PATCH_SIZE,
+                                        patches_per_image=1, max_images=4)
+        test_dl = DataLoader(test_dataset, batch_size=4, shuffle=False)
+        x0_batch = next(iter(test_dl)).to(DEVICE)
+
+        # populate_weights(test_dl)
+        noise_level_tensor = torch.tensor(MAX_TRAINING_NOISE_LEVEL).to(DEVICE)
+        k = get_timestep_from_noise_level(noise_level_tensor, alpha_hat)
+        print(f"Denoising from noise level {MAX_TRAINING_NOISE_LEVEL:.2f}")
+
+        xk_batch = add_noise_level(x0_batch, noise_level_tensor)
+        x_denoised = sample_from_partial(model, xk_batch, k)
+
+        all_imgs = torch.cat([
+            (x0_batch + 1) / 2,  # Original patches (clean)
+            (xk_batch + 1) / 2,  # Degraded (noise + optional blur)
+            (x_denoised + 1) / 2  # Denoised/deblurred result
+        ], dim=0)
+
+        save_image(all_imgs, os.path.join(RESULTS_DIR, "final_comparison.png"), nrow=4)
+        print(f"\nResults saved to {RESULTS_DIR}")
+        if USE_BLUR:
+            print(f"Rows: Original | Degraded (noise+blur) | Restored")
+        else:
+            print(f"Rows: Original (0.0) | Noised ({MAX_TRAINING_NOISE_LEVEL:.2f}) | Denoised")
+    elif _type == "test":
+            model = TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE)
+            opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, EPOCHS)
+
+            start_epoch = _load_latest(model, opt, scheduler, DEVICE)
+            if start_epoch > 0:
+                print(f"   continuing at epoch {start_epoch}")
+            else:
+                print("   no checkpoint found.")
+            test(model,TEXTURE_DIR, PATCH_SIZE, BATCH_SIZE,DEVICE,MODEL_DIR,MAX_TRAINING_NOISE_LEVEL,add_noise_level,get_timestep_from_noise_level,sample_from_partial,  cosine_beta_schedule,TIMESTEPS,RESULTS_DIR)
+
+
