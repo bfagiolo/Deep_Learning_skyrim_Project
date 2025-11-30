@@ -297,13 +297,8 @@ def get_alpha_from_noise_level(noise_level):
     The relationship: alpha = 1 - noise_level
     This gives us: x_noisy = sqrt(alpha)*x0 + sqrt(1-alpha)*noise
     """
-    print(noise_level.shape)
     lv = torch.clamp(noise_level,min=.5*MAX_TRAINING_NOISE_LEVEL, max=MAX_TRAINING_NOISE_LEVEL)
-
-    print(noise_level.shape)
     alpha = lv*-1+ 1
-
-    print(noise_level.shape)
     return alpha
 
 
@@ -937,7 +932,7 @@ def train():
     print(f"Batches per epoch: {len(train_dl)}")
 
     dl = train_dl
-    for epoch in range(EPOCHS):
+    for epoch in range(start_epoch, EPOCHS):
         model.train()
         epoch_loss = 0.0
         epoch_mse = 0.0
