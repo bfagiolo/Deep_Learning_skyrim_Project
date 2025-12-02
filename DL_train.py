@@ -10,8 +10,10 @@ import math
 import glob
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageFile
 Image.MAX_IMAGE_PIXELS = None
+ImageFile.LOAD_TRUNCATED_IMAGES = True  # Add at top of DL_train.py
+
 
 import torch
 import torch.nn as nn
@@ -50,8 +52,12 @@ TEXTURE_DIRS = {"LOCALDEBUG": "/Users/slitf/Downloads/stone_masonry/", "NORMALS"
                 "ARCHIT": "png_input/diffuse/organized_textures/stone_masonry/",
                 "TERRAIN": "png_input/diffuse/organized_textures/terrain_dirt/",
                 "CLOTHING": "png_input/diffuse/organized_textures/armors/"}
-TEXTURE_DIR = TEXTURE_DIRS[args.d]
-SAVE_DIR = "diffusion_run/" + args.d + "/"
+try:
+    # TEXTURE_DIR = TEXTURE_DIRS[args.d]
+    TEXTURE_DIR = "TERRAIN"
+except:
+    TEXTURE_DIR = "TERRAIN"
+SAVE_DIR = "diffusion_run/" + TEXTURE_DIR + "/"
 MODEL_DIR = os.path.join(SAVE_DIR, "model")
 TRAIN_SAMPLES_DIR = os.path.join(SAVE_DIR, "train_samples")
 RESULTS_DIR = os.path.join(SAVE_DIR, "results")
@@ -171,6 +177,8 @@ class PatchTextureDataset(Dataset):
                  patches_per_image=4, paths=None, max_images=None, min_size=None,
                  cache_in_memory=False):
         # Get all image paths
+        if type(root_dir) == list:
+            self.paths = root_dir
         if paths:
             self.paths = paths
         else:
@@ -178,7 +186,7 @@ class PatchTextureDataset(Dataset):
         self.paths = [
             p for p in self.paths
             if os.path.isfile(p)
-            and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))
+            and str(p).lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))
         ]
 
         # Limit number of images if requested
@@ -1108,11 +1116,9 @@ def sample_from_partial(model, x_k, k):
     wt = detail_score(x_k)
     t_test = get_timestep_from_noise_level(noise_level=MAX_TRAINING_NOISE_LEVEL*wt, alpha_hat_tensor=sqrt_alpha_hat)
 
-    x_noisy = add_noise_k(x_k, t_test)
-
+    x_noisy = x_k
     # Quick denoising visualization
     noise_pred = model(x_noisy, t_test)
-
     # Approximate denoised image using predicted noise (one-step)
     # x0_pred ≈ (x_noisy - sqrt(1-alpha_hat) * noise_pred) / sqrt(alpha_hat)
     alpha_hat_t = extract(alpha_hat, t_test, x_noisy.shape)
@@ -1268,107 +1274,125 @@ if __name__ == "__main__":
             print(f"Rows: Original | Degraded (noise+blur) | Restored")
         else:
             print(f"Rows: Original (0.0) | Noised ({MAX_TRAINING_NOISE_LEVEL:.2f}) | Denoised")
-        elif _type == "test":
-            """
-            PATCH-BASED INFERENCE (Option B, simple version)
+    elif _type == "test":
+        
+        submodel = args.d
+        """
+        PATCH-BASED INFERENCE (Option B, simple version)
+
+        - Load latest checkpoint
+        - Take ONE texture from TEXTURE_DIR
+        - Add noise to the FULL image once
+        - Run diffusion on each 256x256 patch separately
+        - Stitch patches back together
+        - Save [original | noised | denoised] to RESULTS_DIR
+        """
+
+        # 1. Load model and resume from latest checkpoint (if any)
+        model = (TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE))
+        if args.d is None:
+            my_path = MODEL_DIR+"/texture_diffusion.pth"
+        else:
+            my_path = MODEL_DIR+"/" + args.d + "/texture_diffusion.pth"
+        print(f"PRINTING PATH: {my_path}")
+        model.load_state_dict(torch.load(my_path))
+        model.eval()
+        opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, EPOCHS)
+        # 2. SAME normalization as training
+        full_img_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.5, 0.5, 0.5),
+                (0.5, 0.5, 0.5)
+            ),
+        ])
+        TEXTURE_DIR = "/workspace/texture_out/architecture"
+        RESULTS_DIR = "/workspace/texture_out/architecture"
+        
+        image_paths = scanfiles(TEXTURE_DIR)
+        print(os.path.join(TEXTURE_DIR))
+        test(model,image_paths, PATCH_SIZE, BATCH_SIZE,DEVICE,MODEL_DIR,MAX_TRAINING_NOISE_LEVEL,add_noise_level,get_timestep_from_noise_level,sample_from_partial,  cosine_beta_schedule,TIMESTEPS,RESULTS_DIR)
+        # 3. Pick ONE texture from TEXTURE_DIR
+        if not image_paths:
+            print(f"No images found in {TEXTURE_DIR}")
+            exit(0)
+
+        for img_path in image_paths:   
+            print(f"Using image: {img_path}")
+            img_name = os.path.splitext(os.path.basename(img_path))[0]
     
-            - Load latest checkpoint
-            - Take ONE texture from TEXTURE_DIR
-            - Add noise to the FULL image once
-            - Run diffusion on each 256x256 patch separately
-            - Stitch patches back together
-            - Save [original | noised | denoised] to RESULTS_DIR
-            """
+            # 4. Load FULL image and normalize to [-1, 1]
+            with Image.open(img_path) as img:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                orig_w, orig_h = img.size
+                x0 = full_img_transform(img).unsqueeze(0).to(DEVICE)  # [1, 3, H, W]
     
-            # 1. Load model and resume from latest checkpoint (if any)
-            model = (TextureUNet(in_ch=3, base_ch=CHANNELS).to(DEVICE))
-            model.load_state_dict(torch.load(MODEL_DIR+"/texture_diffusion.pth"))
-            model.eval()
-            opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, EPOCHS)
-            # 2. SAME normalization as training
-            full_img_transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    (0.5, 0.5, 0.5),
-                    (0.5, 0.5, 0.5)
-                ),
-            ])
+            _, _, H, W = x0.shape
     
-            # 3. Pick ONE texture from TEXTURE_DIR
-            image_paths = scanfiles(TEXTURE_DIR)
-            if not image_paths:
-                print(f"No images found in {TEXTURE_DIR}")
-                exit(0)
+            # 5. Pad H, W up to multiples of PATCH_SIZE (256)
+            #    so we can tile perfectly with non-overlapping patches
+            pad_h = (PATCH_SIZE - (H % PATCH_SIZE)) % PATCH_SIZE
+            pad_w = (PATCH_SIZE - (W % PATCH_SIZE)) % PATCH_SIZE
     
-            for img_path in image_paths   # just use the first one for now
-                print(f"Using image: {img_path}")
-                img_name = os.path.splitext(os.path.basename(img_path))[0]
-        
-                # 4. Load FULL image and normalize to [-1, 1]
-                with Image.open(img_path) as img:
-                    if img.mode != "RGB":
-                        img = img.convert("RGB")
-                    orig_w, orig_h = img.size
-                    x0 = full_img_transform(img).unsqueeze(0).to(DEVICE)  # [1, 3, H, W]
-        
-                _, _, H, W = x0.shape
-        
-                # 5. Pad H, W up to multiples of PATCH_SIZE (256)
-                #    so we can tile perfectly with non-overlapping patches
-                pad_h = (PATCH_SIZE - (H % PATCH_SIZE)) % PATCH_SIZE
-                pad_w = (PATCH_SIZE - (W % PATCH_SIZE)) % PATCH_SIZE
-        
-                if pad_h > 0 or pad_w > 0:
-                    # F.pad takes (left, right, top, bottom)
-                    x0 = F.pad(x0, (0, pad_w, 0, pad_h), mode="replicate")
-        
-                _, _, H_pad, W_pad = x0.shape
-                print(f"Padded to: {H_pad} x {W_pad}")
-        
-                # 6. Add synthetic noise once on the FULL padded image
-                noise_level_tensor = torch.tensor(MAX_TRAINING_NOISE_LEVEL, device=DEVICE)
-                x_noisy_full = noise_level_tensor
-        
-                # 7. Allocate output tensor for denoised image
-                x_denoised_full = torch.zeros_like(x0)
-        
-                # 8. Loop over patches and denoise each patch separately
-                with torch.no_grad():
-                    for top in range(0, H_pad, PATCH_SIZE):
-                        for left in range(0, W_pad, PATCH_SIZE):
-                            patch_noisy = x_noisy_full[:, :,
-                                                       top:top+PATCH_SIZE,
-                                                       left:left+PATCH_SIZE]
-        
-                            # sample_from_partial:
-                            #  - computes detail_score(patch_noisy)
-                            #  - chooses a timestep
-                            #  - adds schedule noise and predicts denoised x0
-                            patch_denoised = sample_from_partial(model, patch_noisy, 0)
-        
-                            x_denoised_full[:, :,
-                                             top:top+PATCH_SIZE,
-                                             left:left+PATCH_SIZE] = patch_denoised
-        
-                # 9. Crop back to original H, W (in case we padded)
-                x0_cropped        = x0[:, :, :H, :W]
-                x_noisy_cropped   = x_noisy_full[:, :, :H, :W]
-                x_denoised_cropped = x_denoised_full[:, :, :H, :W]
-        
-                # 10. Convert from [-1, 1] to [0, 1] for saving
-                x0_vis         = (x0_cropped        + 1) / 2
-                x_noisy_vis    = (x_noisy_cropped   + 1) / 2
-                x_denoised_vis = (x_denoised_cropped + 1) / 2
-        
-                x0_vis         = x0_vis.clamp(0, 1)
-                x_noisy_vis    = x_noisy_vis.clamp(0, 1)
-                x_denoised_vis = x_denoised_vis.clamp(0, 1)
-        
-                # 11. Stack [original | noised | denoised] vertically
-                comparison = torch.cat([x0_vis, x_noisy_vis, x_denoised_vis], dim=0)
-        
-                save_path = os.path.join(RESULTS_DIR, f"full_patched_{img_name}.png")
-                save_image(comparison, save_path, nrow=1)
-                print(f"Saved comparison to: {save_path}")
+            if pad_h > 0 or pad_w > 0:
+                # F.pad takes (left, right, top, bottom)
+                x0 = F.pad(x0, (0, pad_w, 0, pad_h), mode="replicate")
+    
+            _, _, H_pad, W_pad = x0.shape
+            print(f"Padded to: {H_pad} x {W_pad}")
+    
+            # 6. Add synthetic noise once on the FULL padded image
+            x_noisy_full = x0
+    
+            # 7. Allocate output tensor for denoised image
+            x_denoised_full = torch.zeros_like(x0)
+    
+            # 8. Loop over patches and denoise each patch separately
+            with torch.no_grad():
+                for top in range(0, H_pad, PATCH_SIZE):
+                    for left in range(0, W_pad, PATCH_SIZE):
+                        patch_noisy = x_noisy_full[:, :,
+                                                   top:top+PATCH_SIZE,
+                                                   left:left+PATCH_SIZE]
+    
+                        # sample_from_partial:
+                        #  - computes detail_score(patch_noisy)
+                        #  - chooses a timestep
+                        #  - adds schedule noise and predicts denoised x0
+                        patch_denoised = sample_from_partial(model, patch_noisy, 1000)
+    
+                        x_denoised_full[:, :,
+                                         top:top+PATCH_SIZE,
+                                         left:left+PATCH_SIZE] = patch_denoised
+    
+            # 9. Crop back to original H, W (in case we padded)
+            x0_cropped        = x0[:, :, :H, :W]
+            x_noisy_cropped   = x_noisy_full[:, :, :H, :W]
+            x_denoised_cropped = x_denoised_full[:, :, :H, :W]
+    
+            # 10. Convert from [-1, 1] to [0, 1] for saving
+            x0_vis         = (x0_cropped        + 1) / 2
+            x_noisy_vis    = (x_noisy_cropped   + 1) / 2
+            x_denoised_vis = (x_denoised_cropped + 1) / 2
+    
+            x0_vis         = x0_vis.clamp(0, 1)
+            x_noisy_vis    = x_noisy_vis.clamp(0, 1)
+            x_denoised_vis = x_denoised_vis.clamp(0, 1)
+    
+            # 11. Stack [original | noised | denoised] vertically
+            comparison = torch.cat([x_denoised_vis], dim=0)
+    
+            save_path = os.path.join(RESULTS_DIR, img_path)
+            save_image(comparison, save_path, nrow=1)
+            print(f"Saved comparison to: {save_path}")
+            # opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+            # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, EPOCHS)
+
+            # start_epoch = _load_latest(model, opt, scheduler, DEVICE)
+            # if start_epoch > 0:
+            #     print(f"   continuing at epoch {start_epoch}")
+            # else:
+            #     print("   no checkpoint found.")
 

@@ -19,16 +19,12 @@ args = parser.parse_args()
 
 
 # Test dataset preparation
-def prepare_test_dataset(TEXTURE_DIR, PATCH_SIZE, BATCH_SIZE):
+def prepare_test_dataset(all_paths, PATCH_SIZE, BATCH_SIZE):
     """Create test dataset from the texture directory"""
     import glob
     import random
     
     # Get all paths
-    all_paths = glob.glob(os.path.join(TEXTURE_DIR, "*"))
-    all_paths = [p for p in all_paths 
-                 if os.path.isfile(p) 
-                 and p.lower().endswith(('.png', '.jpg', '.jpeg', '.dds'))]
     
     # CRITICAL: Use same seed as training to get same test set
     random.seed(42)
@@ -41,13 +37,12 @@ def prepare_test_dataset(TEXTURE_DIR, PATCH_SIZE, BATCH_SIZE):
     val_size = int(total * 0.1)
     test_paths = all_paths[train_size + val_size:]
     
-    print(f"Test set: {len(test_paths)} images from {TEXTURE_DIR}")
     
     # Import here to avoid circular dependency
     from DL_train import PatchTextureDataset
     
     test_ds = PatchTextureDataset(
-        root_dir=TEXTURE_DIR,
+        root_dir=all_paths,
         patch_size=PATCH_SIZE,
         patches_per_image=1,  # Use 1 patch per image for testing
         paths=test_paths,
@@ -162,7 +157,7 @@ def save_comparisons(x0_batch, xk_batch, x_denoised, batch_idx, RESULTS_DIR):
         print("  Row 3: Reconstruction")
 
 # Main function for testing
-def test(model,TEXTURE_DIR, PATCH_SIZE, BATCH_SIZE,DEVICE,MODEL_DIR,MAX_TRAINING_NOISE_LEVEL,add_noise_level,get_timestep_from_noise_level,sample_from_partial,  cosine_beta_schedule,TIMESTEPS,RESULTS_DIR):
+def test(model,all_paths, PATCH_SIZE, BATCH_SIZE,DEVICE,MODEL_DIR,MAX_TRAINING_NOISE_LEVEL,add_noise_level,get_timestep_from_noise_level,sample_from_partial,  cosine_beta_schedule,TIMESTEPS,RESULTS_DIR):
     print("=" * 60)
     print("TEXTURE DIFFUSION MODEL - TESTING")
     print("=" * 60)
@@ -184,7 +179,7 @@ def test(model,TEXTURE_DIR, PATCH_SIZE, BATCH_SIZE,DEVICE,MODEL_DIR,MAX_TRAINING
     
     # Prepare the test dataset
     print("Preparing test dataset...")
-    test_dl = prepare_test_dataset(TEXTURE_DIR, PATCH_SIZE, BATCH_SIZE)
+    test_dl = prepare_test_dataset(all_paths, PATCH_SIZE, BATCH_SIZE)
     
     if len(test_dl.dataset) == 0:
         print("ERROR: No test images found!")
