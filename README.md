@@ -4,7 +4,7 @@ Deep Learning Final Project: This project uses a hybrid texture-restoration pipe
 How to train our Diffusion on a VM:
 Run the vm by clicking ssh
 Install gcloud
-https://docs.cloud.google.com/sdk/docs/install-sdk 
+https://docs.cloud.google.com/sdk/docs/install-sdk
 Run gcloud init
 Log into your cornell gmail
 Install fuse:
@@ -18,7 +18,7 @@ sudo apt-get install gcsfuse
 Run mkdir "$HOME/data"
 Download the data:
 gcloud storage cp --recursive gs://skyrim-inference-data/ /demo
- /workspace
+/workspace
 git clone https://github.com/bfagiolo/Deep_Learning_skyrim_Project.git
 Cd into the folder containing your .py and Edit your data path:
 vi DL_train.py
@@ -30,17 +30,11 @@ Set TEXTURE_DIR ‘s default value to your data path
 run DL_train.py
 If conducting inference:
 set _type to “test”
-
-
 Edit any parameters such as MAX_TRAINING_NOISE_LEVEL
-run the file with python DL_train.py 
-
-
+run the file with python DL_train.py
 
 Installing cuda drivers:
 https://developer.nvidia.com/cuda-12-4-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Debian&target_version=11&target_type=deb_network
 
 Bullseye backport install error:
 https://docs.google.com/document/d/1TeAL4X5zR0RfB-tISUzvWl4zYyI4I_PgXzcB37aZYL4/edit?tab=t.0
-
-
