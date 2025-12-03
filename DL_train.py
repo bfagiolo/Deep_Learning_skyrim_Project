@@ -1120,7 +1120,7 @@ def sample_from_partial(model, x_k, k):
     noise_pred = model(x_noisy, t_test)
     # Approximate denoised image using predicted noise (one-step)
     # x0_pred ≈ (x_noisy - sqrt(1-alpha_hat) * noise_pred) / sqrt(alpha_hat)
-    alpha_hat_t zz= extract(alpha_hat, t_test, x_noisy.shape)
+    alpha_hat_t= extract(alpha_hat, t_test, x_noisy.shape)
     sqrt_alpha_hat_t = torch.sqrt(alpha_hat_t)
     sqrt_one_minus_ahat_t = torch.sqrt(1.0 - alpha_hat_t)
 
