@@ -1187,7 +1187,7 @@ def scanfiles(input_base_dir):
 # ============================================================
 
 if __name__ == "__main__":
-    _type = "test"
+    _type = "train"
     if _type == "train":
         print("=" * 60)
         print("PATCH-BASED TEXTURE DIFFUSION UPSCALER")
