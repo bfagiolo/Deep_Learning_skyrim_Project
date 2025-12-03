@@ -95,7 +95,3 @@ python DL_train.py
 # Bullseye backport install error:
 
 [https://docs.google.com/document/d/1TeAL4X5zR0RfB-tISUzvWl4zYyI4I_PgXzcB37aZYL4/edit?tab=t.0](https://docs.google.com/document/d/1TeAL4X5zR0RfB-tISUzvWl4zYyI4I_PgXzcB37aZYL4/edit?tab=t.0)
-
----
-
-Let me know if you want this turned into a PDF or a README.md file.
