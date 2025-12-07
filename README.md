@@ -1,3 +1,52 @@
+## Hybrid GAN–Diffusion Pipeline for Modernizing Legacy Game Textures
+
+### Overview
+This project explores a **two-stage generative pipeline** for upscaling and modernizing textures from older video games. By combining **adversarial learning** with **diffusion-based refinement**, the system produces high-resolution textures that are sharper, cleaner, and visually consistent with modern games—while preserving the original artistic style.
+
+### Method
+The pipeline is composed of two sequential generative models:
+
+**Stage 1 — GAN-based Super-Resolution**  
+A GAN-based super-resolution model, inspired by **SRGAN, ESRGAN, and Real-ESRGAN**, reconstructs global structure and high-frequency detail from low-resolution textures. This stage produces perceptually sharp results but may introduce localized noise or artifacts.
+
+**Stage 2 — Diffusion-based Refinement**  
+A diffusion model then takes the GAN output as **conditional input** and performs **iterative probabilistic denoising**. This refinement stage suppresses artifacts, removes residual noise, and recovers finer texture details, resulting in more stable and visually coherent outputs.
+
+### Motivation
+GANs are exceptionally good at reconstructing structure and sharp detail but often struggle with stability and noise artifacts. Diffusion models, while computationally heavier, excel at gradual refinement and artifact suppression.  
+This hybrid design leverages the **speed and structural realism of GANs** with the **stability and detail recovery of diffusion models**.
+
+### Inspirations & Related Work
+This work draws inspiration from both adversarial and diffusion-based super-resolution literature, including:
+
+- **SRGAN** (Ledig et al., 2017)  
+- **ESRGAN** (Wang et al., 2018)  
+- **Real-ESRGAN** (Wang et al., 2021)  
+- **SR3** – Image Super-Resolution via Iterative Refinement (Saharia et al., 2021)  
+- **Latent Diffusion Models** (Rombach et al., 2022)  
+- **SupResDiffGAN** (Kopeć et al., 2025)
+
+### Datasets
+The system is trained and evaluated on real-world gaming texture datasets, including:
+- **Skyrim HD – 2K Textures** (Nexus Mods)
+- **GameIR Super-Resolution Dataset**
+- **SRGD – Super-Resolution Gaming Dataset**
+- **Roboflow Gaming Texture Collections**
+
+### Application
+This project focuses on **offline, asset-level texture enhancement**, targeting:
+- Legacy game remastering
+- Modding workflows
+- Preservation of classic games with modern visual fidelity
+
+### Learning Resource
+This project was additionally informed by the following lecture series on diffusion models:
+
+- 🎥 **Diffusion Models Explained (YouTube Playlist)**  
+  https://www.youtube.com/watch?v=YxSTwfDZftQ&list=PLuYad644ue-wE4yM57RHeaAbgxBD9CyI3&index=1
+
+
+
 # How to train our Diffusion on a VM:
 
 Run the vm by clicking ssh
