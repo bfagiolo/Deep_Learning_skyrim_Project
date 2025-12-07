@@ -39,10 +39,9 @@ This project focuses on **offline, asset-level texture enhancement**, targeting:
 - Modding workflows
 - Preservation of classic games with modern visual fidelity
 
-### Learning Resource
-This project was additionally informed by the following lecture series on diffusion models:
+### Project Demo
 
-- 🎥 **Diffusion Models Explained (YouTube Playlist)**  
+- 🎥 **Skyrim Implementation**  
   https://www.youtube.com/watch?v=YxSTwfDZftQ&list=PLuYad644ue-wE4yM57RHeaAbgxBD9CyI3&index=1
 
 
