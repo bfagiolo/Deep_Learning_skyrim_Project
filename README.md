@@ -1,4 +1,4 @@
-Most of this page is for training your own model. To download our final models or check out our epoch-by-epoch training outputs, visit [this link](https://drive.google.com/drive/folders/1iidgaWieI8dMZiPMZYloXtWjOU0YBB5A?usp=sharing)
+Most of this page is for training your own model. To download our final models or check out our epoch-by-epoch training outputs, visit [this link](https://drive.google.com/drive/folders/1iidgaWieI8dMZiPMZYloXtWjOU0YBB5A?usp=sharing). Note: All train samples (including final comparisons) are sampled from our training set.
 ## Hybrid GAN–Diffusion Pipeline for Modernizing Legacy Game Textures
 
 ### Overview
