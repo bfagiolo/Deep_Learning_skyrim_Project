@@ -1,8 +1,8 @@
 To download our final models or check out our epoch-by-epoch training outputs, visit [this link](https://drive.google.com/drive/folders/1iidgaWieI8dMZiPMZYloXtWjOU0YBB5A?usp=sharing). All train samples (including final comparisons) are sampled from our training set.
 
 NOTE: The instructions on this page are pretty much just for training your own **diffusion** model. The GAN was rushed and didn't end up being that useful. To replace its function in the pipeline you can:
-1. [Only do if training with high res images, otherwise skip to step 3] Just create a function to downsize your input by a factor of N (which you can choose, we chose 4)
-2. [Only do if training with high res images, otherwise skip to step 3] Resize (aka stretch) the downsized image back to its original size (this destroys details and makes it blurry to resemble an outdated texture)
+1. **[If your input is already blurry, skip to step 3]** Just create a function to downsize your input by a factor of N (which you can choose, we chose 4)
+2. **[If your input is already blurry, skip to step 3]** Resize (aka stretch) the downsized image back to its original size (this destroys details from the high res image and makes it blurry to resemble an outdated texture)
 3. Add gaussian noise to it (if you want to copy or use our `add_noise_level` function from DL_train.py, the same amount of noise that the diffusion model is trained to will be added to your image).
 
 ## Hybrid GAN–Diffusion Pipeline for Modernizing Legacy Game Textures
