@@ -1,3 +1,4 @@
+Most of this page is for training your own model. To download our final models, visit [this link](https://drive.google.com/drive/folders/1iidgaWieI8dMZiPMZYloXtWjOU0YBB5A?usp=sharing)
 ## Hybrid GAN–Diffusion Pipeline for Modernizing Legacy Game Textures
 
 ### Overview
